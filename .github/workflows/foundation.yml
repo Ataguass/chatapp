@@ -1,0 +1,74 @@
+name: Backend foundation
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      # Disposable credentials for services bound to this hosted runner.
+      DATABASE_URL: postgresql://messaging_ci:ci_only_pg@127.0.0.1:5432/messaging_ci
+      REDIS_URL: redis://default:ci_only_cache@127.0.0.1:16379/0
+      API_PORT: '14080'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - name: Start disposable PostgreSQL and Redis
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql-16 redis-server caddy
+          pg_isready -h 127.0.0.1 -p 5432 || sudo pg_ctlcluster 16 main start
+          sudo -u postgres psql -v ON_ERROR_STOP=1 -c "CREATE ROLE messaging_ci LOGIN PASSWORD 'ci_only_pg'"
+          sudo -u postgres createdb --owner=messaging_ci messaging_ci
+          redis-server --bind 127.0.0.1 --port 16379 --requirepass ci_only_cache --daemonize yes --save '' --appendonly no
+      - name: Build, test and migrate
+        run: bash infrastructure/scripts/prepare-release.sh
+      - name: Reapply migrations, check for drift and exercise real services
+        run: |
+          pnpm db:deploy
+          pnpm db:drift
+          pnpm test:integration
+      - name: Validate the proxy site block
+        env:
+          MESSAGING_API_DOMAIN: http://127.0.0.1:14081
+          MESSAGING_API_UPSTREAM: 127.0.0.1:14080
+        run: caddy validate --adapter caddyfile --config infrastructure/caddy/messaging-api.caddy
+      - name: Smoke-test the compiled server and graceful shutdown
+        run: |
+          node server/dist/index.js > "$RUNNER_TEMP/messaging-api.log" &
+          api_pid=$!
+          trap 'kill -TERM "$api_pid" 2>/dev/null || true' EXIT
+          curl --retry 12 --retry-connrefused --retry-delay 1 -fsS http://127.0.0.1:14080/health/ready
+          bash infrastructure/scripts/check-deployment.sh http://127.0.0.1:14080
+          ready_status() {
+            for attempt in {1..20}; do
+              code=$(curl -sS --max-time 4 -o /dev/null -w '%{http_code}' http://127.0.0.1:14080/health/ready)
+              if [[ "$code" == "$1" ]]; then return 0; fi
+              sleep 1
+            done
+            echo "Expected readiness $1; received $code" >&2
+            return 1
+          }
+          REDISCLI_AUTH=ci_only_cache redis-cli -p 16379 SHUTDOWN NOSAVE
+          ready_status 503
+          curl -fsS http://127.0.0.1:14080/health/live
+          redis-server --bind 127.0.0.1 --port 16379 --requirepass ci_only_cache --daemonize yes --save '' --appendonly no
+          ready_status 200
+          sudo pg_ctlcluster 16 main stop
+          ready_status 503
+          curl -fsS http://127.0.0.1:14080/health/live
+          sudo pg_ctlcluster 16 main start
+          ready_status 200
+          kill -TERM "$api_pid"
+          wait "$api_pid"
+          trap - EXIT

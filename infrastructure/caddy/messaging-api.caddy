@@ -1,0 +1,4 @@
+# Site block for the reviewed proxy configuration. Set both variables on the proxy.
+{$MESSAGING_API_DOMAIN} {
+	reverse_proxy {$MESSAGING_API_UPSTREAM}
+}

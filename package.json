@@ -1,0 +1,23 @@
+{
+  "name": "messaging-platform",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.32.1",
+  "engines": {
+    "node": ">=22.18.0 <25"
+  },
+  "scripts": {
+    "generate": "pnpm --filter @messaging/server run generate",
+    "build": "pnpm --filter @messaging/server run build",
+    "start": "pnpm --filter @messaging/server run start",
+    "dev": "pnpm --filter @messaging/server run dev",
+    "test": "pnpm --filter @messaging/server run test",
+    "test:core": "node --test server/test/core/*.test.ts",
+    "test:integration": "pnpm --filter @messaging/server run test:integration",
+    "db:validate": "pnpm --filter @messaging/server run db:validate",
+    "db:dev": "pnpm --filter @messaging/server run db:dev",
+    "db:deploy": "pnpm --filter @messaging/server run db:deploy",
+    "db:status": "pnpm --filter @messaging/server run db:status",
+    "db:drift": "pnpm --filter @messaging/server run db:drift"
+  }
+}
