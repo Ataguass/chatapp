@@ -1,0 +1,95 @@
+name: messaging-foundation
+
+x-logging: &logging
+  driver: local
+  options:
+    max-size: "5m"
+    max-file: "2"
+
+services:
+  db:
+    image: postgres:16-bookworm
+    restart: unless-stopped
+    cpus: 0.60
+    mem_limit: 768m
+    logging: *logging
+    environment:
+      POSTGRES_DB: messaging
+      POSTGRES_USER: messaging_owner
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_admin_password
+    secrets: [db_admin_password, db_api_password]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infrastructure/docker/10-api-role.sh:/docker-entrypoint-initdb.d/10-api-role.sh:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "messaging_owner", "-d", "messaging"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+
+  cache:
+    image: redis:7.4-alpine
+    command: ["redis-server", "/run/secrets/redis_config"]
+    restart: unless-stopped
+    cpus: 0.15
+    mem_limit: 128m
+    logging: *logging
+    secrets: [redis_config]
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$(sed -n 's/^requirepass //p' /run/secrets/redis_config)\" redis-cli ping | grep -qx PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  migrate:
+    image: ${MESSAGING_IMAGE:?Set MESSAGING_IMAGE to the prebuilt API image}
+    pull_policy: never
+    command: ["node", "scripts/prisma.ts", "deploy"]
+    environment:
+      MIGRATION_DATABASE_URL_FILE: /run/secrets/migration_url
+    secrets: [migration_url]
+    depends_on:
+      db: {condition: service_healthy}
+    cpus: 0.50
+    mem_limit: 384m
+    logging: *logging
+    restart: "no"
+
+  api:
+    image: ${MESSAGING_IMAGE:?Set MESSAGING_IMAGE to the prebuilt API image}
+    pull_policy: never
+    init: true
+    restart: unless-stopped
+    cpus: 0.50
+    mem_limit: 384m
+    logging: *logging
+    environment:
+      API_HOST: 0.0.0.0
+      API_PORT: "4080"
+      DATABASE_URL_FILE: /run/secrets/database_url
+      REDIS_URL_FILE: /run/secrets/redis_url
+    secrets: [database_url, redis_url]
+    volumes: [media:/var/lib/messaging/media]
+    ports: ["127.0.0.1:${MESSAGING_API_PORT:-4080}:4080"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      cache: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4080/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+      start_period: 10s
+
+volumes:
+  pgdata:
+  media:
+
+secrets:
+  db_admin_password: {file: ./secrets/compose/db_admin_password}
+  db_api_password: {file: ./secrets/compose/db_api_password}
+  migration_url: {file: ./secrets/compose/migration_url}
+  database_url: {file: ./secrets/compose/database_url}
+  redis_url: {file: ./secrets/compose/redis_url}
+  redis_config: {file: ./secrets/compose/redis_config}

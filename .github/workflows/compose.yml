@@ -1,0 +1,55 @@
+name: ARM64 Compose
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compose:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    env:
+      MESSAGING_IMAGE: messaging-api:${{ github.sha }}
+      COMPOSE_PROJECT_NAME: messaging-ci
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build API and migration image on ARM64
+        run: |
+          docker build -f infrastructure/docker/Dockerfile -t "$MESSAGING_IMAGE" .
+          test "$(docker image inspect "$MESSAGING_IMAGE" --format '{{.Architecture}}')" = arm64
+      - name: Initialize private services and verify the foundation
+        run: |
+          python3 infrastructure/scripts/init-compose-secrets.py
+          python3 infrastructure/scripts/init-compose-secrets.py
+          docker compose config -q
+          docker compose up -d --wait --wait-timeout 150
+          bash infrastructure/scripts/check-deployment.sh http://127.0.0.1:4080
+          docker compose run --rm --no-deps migrate node scripts/prisma.ts deploy
+          docker compose run --rm --no-deps migrate node scripts/prisma.ts status
+          docker compose exec -T api node -e "require('fs').accessSync('/var/lib/messaging/media', require('fs').constants.W_OK)"
+          for service in db cache; do
+            bindings=$(docker inspect --format '{{len .HostConfig.PortBindings}}' "$(docker compose ps -q "$service")")
+            echo "$service has $bindings published ports"
+            test "$bindings" = 0
+          done
+          docker inspect --format '{{json .HostConfig.PortBindings}}' "$(docker compose ps -q api)" |
+            python3 -c 'import json,sys; actual=json.load(sys.stdin); expected={"4080/tcp":[{"HostIp":"127.0.0.1","HostPort":"4080"}]}; print(actual); assert actual == expected'
+          docker image inspect "$MESSAGING_IMAGE" postgres:16-bookworm redis:7.4-alpine --format '{{index .RepoTags 0}} {{.Size}} bytes'
+      - name: Show service state on failure
+        if: failure()
+        run: |
+          docker compose ps -a
+          docker compose logs --tail=80
+      - name: Export tested image for manual deployment
+        if: github.event_name == 'workflow_dispatch'
+        run: docker image save "$MESSAGING_IMAGE" | gzip -1 > "$RUNNER_TEMP/messaging-api-arm64.tar.gz"
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          name: messaging-api-arm64-${{ github.sha }}
+          path: ${{ runner.temp }}/messaging-api-arm64.tar.gz
+          retention-days: 3
