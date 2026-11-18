@@ -6,15 +6,39 @@ Run `bash infrastructure/scripts/oracle-inventory.sh` over the usual SSH session
 
 Review who owns ports 80 and 443, the current reverse-proxy site configuration, available memory and free disk space. Record the existing n8n and Hermes health and routing before choosing limits for the messaging stack. Keep credentials and private hostnames out of any shared output.
 
-## Release preparation
+## Compose deployment on ARM64
 
-The native release entry point works on a dedicated application checkout with Node and pnpm installed. It also serves as the build and migration sequence for the future Compose deployment.
+The repository's Compose file creates the `messaging-foundation` project. It runs PostgreSQL, an ephemeral Redis cache, one migration job and the API. Only the API publishes a host port, on loopback. Persistent database and media volumes belong to this project. Docker rotates each service's logs at 5 MB with two files. Budget disk for the database, media, backups and future image updates as well as the initial image layers.
 
-1. Configure a dedicated messaging database and Redis endpoint. Set `DATABASE_URL` and `REDIS_URL`, or set `DATABASE_URL_FILE` and `REDIS_URL_FILE` to files containing the complete connection strings. Each setting has a single source. Files may end in a newline.
-2. When using separate PostgreSQL roles, supply `MIGRATION_DATABASE_URL` or `MIGRATION_DATABASE_URL_FILE` for DDL. Both roles must point at the same database and public schema. Grant the runtime role schema usage and the table permissions it needs. Readiness requires SELECT on `users` and `messages`.
-3. Run `bash infrastructure/scripts/prepare-release.sh`. It applies pending migrations only after the build and unit/HTTP tests succeed. A failed migration stops the script. Inspect Prisma's status and the failed transaction before resolving its history.
-4. Start the built API with `pnpm start` under the selected process manager. Use `NODE_ENV=production` and password-bearing database and Redis connection strings. The starting bind address is `127.0.0.1:4080`. Check that the chosen address is free. A container with a private network typically listens on `0.0.0.0` inside the container.
-5. Check the origin with `bash infrastructure/scripts/check-deployment.sh http://127.0.0.1:4080`, substituting the chosen port.
+### Build away from the VPS
+
+The **ARM64 Compose** workflow runs on an ARM64 GitHub-hosted runner. It builds and boots the stack, tests migrations and probes both HTTP endpoints. After merging, use **Actions → ARM64 Compose → Run workflow** on the intended revision to export the tested image as an artifact. The artifact name ends with the full Git commit SHA. Keep the checkout, image and Compose file at that same revision.
+
+Download the artifact to your workstation and unzip it there. Transfer the image using an SSH account with existing Docker access. Streaming avoids keeping a second image archive on the server. Replace the SSH destination with your usual login.
+
+```bash
+gzip -dc messaging-api-arm64.tar.gz | ssh YOUR_SSH_DESTINATION docker image load
+```
+
+Alternatively build on another ARM64 machine with `docker build -f infrastructure/docker/Dockerfile -t messaging-api:$(git rev-parse HEAD) .` and transfer using `docker image save`. The Compose file expects the application image to have already been loaded into the target Docker daemon.
+
+### Start on the selected host
+
+1. Use the host inventory and the existing Docker operator's `docker system df` to assess capacity on the filesystem containing Docker's data directory. Check published ports with `docker ps` and TCP listeners with `ss -lnt`. Use the existing administrative session to inspect the proxy, volumes and project names. Confirm the new project name is unused on first deployment. The API port defaults to 4080 and can be changed with `MESSAGING_API_PORT`.
+2. From the matching Git checkout, run the commands below after checking disk headroom. The two vendor images are pulled only if missing. The database is initialized with a dedicated bootstrap account, and migrations run under that account. The HTTP service receives its own read-only database login. Future write endpoints need explicit grants.
+3. Keep the generated credentials together with the database backup. The initialization script reuses an existing set. Restoring the data volume requires its matching credentials.
+
+```bash
+export MESSAGING_IMAGE="messaging-api:$(git rev-parse HEAD)"
+export MESSAGING_API_PORT=4080
+python3 infrastructure/scripts/init-compose-secrets.py
+docker compose config -q
+docker image inspect "$MESSAGING_IMAGE" --format '{{.Architecture}} {{.Size}} bytes'
+docker compose up -d --wait --wait-timeout 150
+bash infrastructure/scripts/check-deployment.sh "http://127.0.0.1:$MESSAGING_API_PORT"
+```
+
+For native development or deployment, `bash infrastructure/scripts/prepare-release.sh` installs locked dependencies, generates Prisma, builds, tests and migrates the configured PostgreSQL database. See the [local setup](../README.md#start-locally) for its configuration.
 
 ## Proxy integration after inventory review
 
@@ -33,4 +57,4 @@ For an existing Caddy deployment, review the merged configuration and validate i
 | Compare pre/post routing and health for n8n and Hermes | Same routes and healthy services |
 | Review published listeners and volumes | PostgreSQL, Redis and future private media are reachable only by intended services |
 
-The Oracle rollout awaits the host inventory, finalized Compose configuration and an authorized deployment session. No cloud credentials are included in this repository.
+Oracle acceptance requires running these checks on the selected VPS and confirming its public HTTPS route with the existing proxy operator.

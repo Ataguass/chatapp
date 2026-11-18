@@ -54,4 +54,4 @@ Run the inventory script on the VPS that hosts n8n and Hermes.
 bash infrastructure/scripts/oracle-inventory.sh
 ```
 
-The Compose manifest, port bindings, resource budgets and proxy integration depend on that output. The exact deployment sequence and remaining acceptance checks are in [Deployment](docs/deployment.md). Local verification results are in [Verification](docs/verification.md).
+The Compose project runs the database, Redis, migrations and API with a loopback port for the existing proxy. Build the ARM64 image off-host using the [deployment instructions](docs/deployment.md). Local verification results are in [Verification](docs/verification.md).
