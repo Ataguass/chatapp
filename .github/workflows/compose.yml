@@ -31,9 +31,13 @@ jobs:
           docker compose run --rm --no-deps migrate node scripts/prisma.ts deploy
           docker compose run --rm --no-deps migrate node scripts/prisma.ts status
           docker compose exec -T api node -e "require('fs').accessSync('/var/lib/messaging/media', require('fs').constants.W_OK)"
-          test -z "$(docker compose port db 5432 2>/dev/null || true)"
-          test -z "$(docker compose port cache 6379 2>/dev/null || true)"
-          test "$(docker compose port api 4080)" = "127.0.0.1:4080"
+          for service in db cache; do
+            bindings=$(docker inspect --format '{{len .HostConfig.PortBindings}}' "$(docker compose ps -q "$service")")
+            echo "$service has $bindings published ports"
+            test "$bindings" = 0
+          done
+          docker inspect --format '{{json .HostConfig.PortBindings}}' "$(docker compose ps -q api)" |
+            python3 -c 'import json,sys; actual=json.load(sys.stdin); expected={"4080/tcp":[{"HostIp":"127.0.0.1","HostPort":"4080"}]}; print(actual); assert actual == expected'
           docker image inspect "$MESSAGING_IMAGE" postgres:16-bookworm redis:7.4-alpine --format '{{index .RepoTags 0}} {{.Size}} bytes'
       - name: Show service state on failure
         if: failure()
