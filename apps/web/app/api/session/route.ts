@@ -49,7 +49,10 @@ export async function POST(request: Request) {
     platform: "web",
     deviceName: "Web browser",
   };
-  if (body.action === "register") payload.displayName = typeof body.displayName === "string" ? body.displayName : body.username;
+  if (body.action === "register") {
+    payload.displayName = typeof body.displayName === "string" && body.displayName.trim()
+      ? body.displayName.trim() : body.username;
+  }
   const endpoint = body.action === "register" ? "register" : "login";
   const response = await fetch(backendUrl(`/v1/auth/${endpoint}`), {
     method: "POST",

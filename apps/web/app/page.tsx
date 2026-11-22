@@ -131,6 +131,9 @@ function authError(code: string) {
     username_taken: "That username is already taken.",
     invalid_username: "Use 3–32 letters, numbers, or underscores.",
     invalid_password: "Choose a password with at least 12 characters.",
+    attachment_too_large: "This file exceeds the upload limit for its type.",
+    unsupported_media_type: "Choose an image, MP4 video, MP3/WAV audio file, or PDF.",
+    media_signature_mismatch: "The file contents don't match the selected file type.",
     service_unavailable: "The chat service is unavailable right now.",
   };
   return messages[code] ?? "We couldn't complete that request. Check your details and try again.";
@@ -152,6 +155,7 @@ export default function Home() {
   const [notice, setNotice] = useState("");
   const [socketOnline, setSocketOnline] = useState(false);
   const socketRef = useRef<Socket | null>(null);
+  const mainContentRef = useRef<HTMLElement>(null);
   const conversationsRef = useRef(conversations);
   const selectedRef = useRef(selectedId);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -187,24 +191,27 @@ export default function Home() {
   useEffect(() => {
     if (!user) return;
     let active = true;
+    let socket: Socket | null = null;
+    let socketRefreshTimer: ReturnType<typeof setTimeout> | null = null;
     void loadConversations().catch(error => setNotice(error instanceof Error ? authError(error.message) : "Couldn't load chats."));
     fetch("/api/socket-token", { cache: "no-store" }).then(async response => {
       if (!response.ok) throw new Error("unauthorized");
-      return response.json() as Promise<{ accessToken: string }>;
-    }).then(({ accessToken }) => {
+      return response.json() as Promise<{ accessToken: string; accessExpiresAt: number }>;
+    }).then(({ accessToken, accessExpiresAt }) => {
       if (!active) return;
-      const socket = io(process.env.NEXT_PUBLIC_SOCKET_URL ?? "http://127.0.0.1:4080", {
+      const currentSocket = io(process.env.NEXT_PUBLIC_SOCKET_URL ?? "http://127.0.0.1:4080", {
         auth: { token: accessToken },
         reconnection: true,
         reconnectionDelayMax: 5000,
       });
-      socketRef.current = socket;
-      socket.on("connect", () => {
+      socket = currentSocket;
+      socketRef.current = currentSocket;
+      currentSocket.on("connect", () => {
         setSocketOnline(true);
-        for (const conversation of conversationsRef.current) socket.emit("conversation:join", { conversationId: conversation.id });
+        for (const conversation of conversationsRef.current) currentSocket.emit("conversation:join", { conversationId: conversation.id });
       });
-      socket.on("disconnect", () => setSocketOnline(false));
-      socket.on("message:new", (message: PublicMessage) => {
+      currentSocket.on("disconnect", () => setSocketOnline(false));
+      currentSocket.on("message:new", (message: PublicMessage) => {
         if (selectedRef.current === message.conversationId) {
           setMessages(current => current.some(item => item.id === message.id) ? current : [...current, message]);
           void api("conversations/" + message.conversationId + "/read", {
@@ -215,10 +222,31 @@ export default function Home() {
         }
         setPreviews(current => ({ ...current, [message.conversationId]: message.content || message.attachment?.fileName || "Attachment" }));
       });
+      const refreshSocketSession = async () => {
+        try {
+          const response = await fetch("/api/socket-token?refresh=1", { cache: "no-store" });
+          if (!response.ok) throw new Error("session_refresh_failed");
+          const next = await response.json() as { accessToken: string; accessExpiresAt: number };
+          if (!active || !socket) return;
+          socket.auth = { token: next.accessToken };
+          socket.disconnect();
+          socket.connect();
+          scheduleSocketRefresh(next.accessExpiresAt);
+        } catch {
+          if (active) socketRefreshTimer = setTimeout(() => void refreshSocketSession(), 30_000);
+        }
+      };
+      const scheduleSocketRefresh = (expiry: number) => {
+        if (socketRefreshTimer) clearTimeout(socketRefreshTimer);
+        const delay = Math.max(30_000, expiry - Date.now() - 60_000);
+        socketRefreshTimer = setTimeout(() => void refreshSocketSession(), delay);
+      };
+      scheduleSocketRefresh(accessExpiresAt);
     }).catch(() => undefined);
     return () => {
       active = false;
-      socketRef.current?.disconnect();
+      if (socketRefreshTimer) clearTimeout(socketRefreshTimer);
+      socket?.disconnect();
       socketRef.current = null;
       setSocketOnline(false);
     };
@@ -329,6 +357,13 @@ export default function Home() {
   if (!user) return <AuthScreen onAuthenticated={setUser} />;
 
   return <main className={`messenger ${mobileChatOpen ? "mobile-chat-open" : ""}`}>
+    <a className="skip-link" href="#main-content" onClick={event => {
+      if (window.matchMedia("(max-width: 680px)").matches && !mobileChatOpen) {
+        event.preventDefault();
+        setMobileChatOpen(true);
+        setTimeout(() => mainContentRef.current?.focus(), 0);
+      }
+    }}>Skip to conversation</a>
     <aside className="chat-sidebar">
       <div className="sidebar-top">
         <a className="brand" href="#home" aria-label="Chatapp home"><span className="brand-mark"><Icon name="message" size={19} /></span><span>chatapp</span></a>
@@ -355,7 +390,7 @@ export default function Home() {
       <div className="sidebar-bottom"><div className={`connection-indicator ${socketOnline ? "is-online" : ""}`}><span />{socketOnline ? "Connected" : "Reconnecting…"}</div><span className="sidebar-user">Signed in as <strong>{user.displayName}</strong></span></div>
     </aside>
 
-    <section className={`chat-panel ${selected ? "has-chat" : ""}`} aria-label="Conversation">
+    <section ref={mainContentRef} className={`chat-panel ${selected ? "has-chat" : ""}`} aria-label="Conversation" id="main-content" tabIndex={-1}>
       {selected ? <>
         <header className="chat-header">
           <button className="icon-button mobile-back" type="button" aria-label="Back to chats" onClick={() => setMobileChatOpen(false)}><Icon name="back" /></button>
@@ -364,7 +399,7 @@ export default function Home() {
           <div className="header-tools"><span className={`connection-indicator header-connection ${socketOnline ? "is-online" : ""}`}><span />{socketOnline ? "Live" : "Offline"}</span><button className="icon-button" type="button" title="Sign out" aria-label="Sign out" onClick={logout}><Icon name="logout" /></button></div>
         </header>
         {notice && <div className="notice-bar" role="status"><span>{notice}</span><button type="button" aria-label="Dismiss message" onClick={() => setNotice("")}><Icon name="close" size={16} /></button></div>}
-        <div className="message-scroll" aria-live="polite">
+        <div className="message-scroll">
           <div className="chat-date"><span>THIS IS THE START OF YOUR STORY</span></div>
           {messages.map(message => {
             const mine = message.senderId === user.id;
@@ -442,8 +477,20 @@ function PeopleModal({ mode, onClose, onStart, onCreateGroup, busy }: {
     setPicked(current => current.some(item => item.id === person.id) ? current.filter(item => item.id !== person.id) : [...current, person]);
   }
 
+  function keepFocusInDialog(event: KeyboardEvent<HTMLElement>) {
+    if (event.key !== "Tab") return;
+    const controls = [...event.currentTarget.querySelectorAll<HTMLElement>(
+      'button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex="-1"])',
+    )].filter(control => control.offsetParent !== null);
+    const first = controls[0];
+    const last = controls.at(-1);
+    if (!first || !last) return;
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  }
+
   return <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
-    <section className="people-modal" role="dialog" aria-modal="true" aria-labelledby="people-modal-title">
+    <section className="people-modal" role="dialog" aria-modal="true" aria-labelledby="people-modal-title" onKeyDown={keepFocusInDialog}>
       <div className="modal-head"><div><span className="eyebrow">{mode === "chat" ? "START SOMETHING NEW" : "BRING YOUR PEOPLE TOGETHER"}</span><h2 id="people-modal-title">{mode === "chat" ? "Find a person" : "Create a group"}</h2></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={onClose}><Icon name="close" /></button></div>
       {mode === "group" && <label className="group-title-field">Group name<input value={title} onChange={event => setTitle(event.target.value)} maxLength={120} placeholder="Weekend plans" /></label>}
       <label className="search-box modal-search"><Icon name="search" size={18} /><input autoFocus value={query} onChange={event => setQuery(event.target.value)} placeholder="Search by username" aria-label="Search by username" /></label>

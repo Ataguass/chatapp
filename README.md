@@ -20,6 +20,10 @@ pnpm start
 
 From a second terminal, run `bash infrastructure/scripts/check-deployment.sh http://127.0.0.1:4080`. The script checks both the HTTP status and response body. Use `pnpm dev` for source watch mode after generating the Prisma client.
 
+## Web chat app
+
+The Next.js App Router client lives in `apps/web`. It includes account registration and login, conversation search, direct chats, group creation, live text messaging, and private attachment uploads. Its same-origin API routes keep access and refresh tokens in HTTP-only cookies; Socket.IO receives a short-lived access token only in memory. Copy `apps/web/.env.example` to `apps/web/.env.local`, then run `pnpm install --frozen-lockfile` and `pnpm dev:web`. The backend must be running at `http://127.0.0.1:4080`, with `http://127.0.0.1:3000` allowed in `SOCKET_ALLOWED_ORIGINS`. On a local development machine, use the Docker Compose stack described in [Deployment](docs/deployment.md) to provide the API, PostgreSQL and Redis.
+
 ## Foundation checks
 
 | Command | What it verifies |
@@ -43,6 +47,7 @@ GitHub Actions repeats the build, migrations, real-service tests and smoke check
 | `server/src/modules/users` | Profiles, username search and user blocking |
 | `server/src/modules/conversations` | Direct and group conversation creation, membership, roles and invitation links |
 | `server/src/modules/messages` | Text and media messages, private attachment storage, read receipts, replies, reactions, edits and deletion |
+| `apps/web` | Next.js browser client and same-origin authenticated API proxy |
 | `server/prisma` | PostgreSQL schema and transactional migrations for identity, conversations, messaging and group invites |
 | `server/test` | Core, HTTP and service integration tests |
 | `packages/shared-types` | Shared health, account, conversation, group and message contracts |
