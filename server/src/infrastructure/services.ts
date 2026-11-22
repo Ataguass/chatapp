@@ -19,5 +19,5 @@ export function openServices(config: ReturnType<typeof settings>, log: Logger) {
     },
     redis: async () => { if (await redis.ping() !== "PONG") throw new Error("Redis probe failed"); },
   }, config.deadline, (dependency, ok) => log(ok ? "dependency.ready" : "dependency.unavailable", { dependency }));
-  return { ...health, async close() { redis.disconnect(); await db.$disconnect(); } };
+  return { ...health, db, redis, async close() { redis.disconnect(); await db.$disconnect(); } };
 }

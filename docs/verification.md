@@ -18,4 +18,4 @@ The source was exercised on Linux x86-64 with Node.js 22.18.0, pnpm 10.32.1, Pri
 | Stop PostgreSQL, then restart it | Liveness 200 throughout the sampled outage, readiness 503 during the outage and 200 after reconnect |
 | SIGTERM after recovery | Clean process exit with status 0 |
 
-GitHub Actions configuration and shell syntax were checked locally. A hosted workflow run, Oracle deployment, public TLS and coexistence checks with n8n and Hermes require their respective environments. The first-release product acceptance tests for registration, message delivery, uploads, devices and push belong to later work in Release 1.
+GitHub Actions configuration and shell syntax were checked locally. A hosted workflow run, Oracle deployment, public TLS and coexistence checks with n8n and Hermes require their respective environments. The product acceptance checks for registration, message delivery, uploads, device registration and push delivery still need to be run against the current release.

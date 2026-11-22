@@ -11,6 +11,7 @@
     "build": "pnpm --filter @messaging/server run build",
     "start": "pnpm --filter @messaging/server run start",
     "dev": "pnpm --filter @messaging/server run dev",
+    "dev:web": "pnpm --filter @messaging/web run dev",
     "test": "pnpm --filter @messaging/server run test",
     "test:core": "node --test server/test/core/*.test.ts",
     "test:integration": "pnpm --filter @messaging/server run test:integration",

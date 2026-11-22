@@ -5,5 +5,8 @@ coverage/
 .env.*
 !.env.example
 secrets/
+**/*firebase-service-account*.json
+**/*firebase-adminsdk*.json
+server/data/
 *.log
 .DS_Store

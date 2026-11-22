@@ -1,0 +1,111 @@
+name: messaging-platform
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: messaging
+      POSTGRES_USER: messaging
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U messaging -d messaging"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    cpus: 1.0
+    mem_limit: 1536m
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - >-
+        exec redis-server --save "" --appendonly no --maxmemory 192mb
+        --maxmemory-policy allkeys-lru
+        --requirepass "$$(cat /run/secrets/redis_password)"
+    secrets:
+      - redis_password
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - REDISCLI_AUTH="$$(cat /run/secrets/redis_password)" redis-cli ping | grep -q PONG
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    cpus: 0.25
+    mem_limit: 256m
+    logging: *logging
+
+  api:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      API_HOST: 0.0.0.0
+      API_PORT: 4080
+      HEALTH_TIMEOUT_MS: 1500
+      MAX_GROUP_MEMBERS: ${MAX_GROUP_MEMBERS:-100}
+      MEDIA_STORAGE_PATH: /var/lib/messaging/media
+      MEDIA_IMAGE_MAX_BYTES: ${MEDIA_IMAGE_MAX_BYTES:-10485760}
+      MEDIA_VIDEO_MAX_BYTES: ${MEDIA_VIDEO_MAX_BYTES:-52428800}
+      MEDIA_AUDIO_MAX_BYTES: ${MEDIA_AUDIO_MAX_BYTES:-20971520}
+      MEDIA_DOCUMENT_MAX_BYTES: ${MEDIA_DOCUMENT_MAX_BYTES:-26214400}
+      FCM_PROJECT_ID: ${FCM_PROJECT_ID:-}
+      FCM_SERVICE_ACCOUNT_FILE: ${FCM_SERVICE_ACCOUNT_FILE:-}
+      SOCKET_ALLOWED_ORIGINS: ${SOCKET_ALLOWED_ORIGINS:-}
+      DATABASE_URL_FILE: /run/secrets/database_url
+      REDIS_URL_FILE: /run/secrets/redis_url
+    secrets:
+      - database_url
+      - redis_url
+    volumes:
+      - media_data:/var/lib/messaging/media
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:4080:4080"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:4080/health/ready').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 15s
+      timeout: 4s
+      retries: 3
+      start_period: 30s
+    cpus: 0.75
+    mem_limit: 768m
+    logging: *logging
+
+volumes:
+  postgres_data:
+  media_data:
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password
+  redis_password:
+    file: ./secrets/redis_password
+  database_url:
+    file: ./secrets/database_url
+  redis_url:
+    file: ./secrets/redis_url

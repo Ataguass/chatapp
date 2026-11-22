@@ -1,8 +1,40 @@
 # Deploying the foundation
 
-## Obtain the host inventory
+## Compose deployment
 
-Run `bash infrastructure/scripts/oracle-inventory.sh` over the usual SSH session. It reports CPU architecture and count, RAM, swap, root disk capacity, Docker and Compose versions, container names, ports and disk usage. Port listings distinguish occupied public ports from free loopback bindings. The command reads the host and does not change application state.
+The Compose project is isolated from the existing `n8n` and `rideflow` projects. It starts its own PostgreSQL database and Redis cache; it does not attach to, migrate, or publish either existing service. PostgreSQL and Redis have no host port bindings. The API is bound only to `127.0.0.1:4080`, following the existing Caddy container's host-network proxy pattern.
+
+The current VPS inventory showed 2 CPU cores, 11 GiB RAM and 7.9 GiB free disk, with Caddy already using ports 80/443 and other applications using 5432/6379. The Compose services have conservative CPU and memory limits to fit this host. Check free disk before building: the root filesystem was already 83% full. Do not remove Docker images, volumes or containers to make room without identifying their owners and confirming backups.
+
+From the repository root on the VPS:
+
+```bash
+bash infrastructure/scripts/create-compose-secrets.sh
+docker compose build api
+docker compose up -d postgres redis
+docker compose run --rm --no-deps api pnpm db:deploy
+docker compose up -d api
+docker compose ps
+```
+
+The secret setup script creates random 256-bit passwords and connection URL files under the ignored `secrets/` directory, with owner-only permissions. Back up these files securely: the database URL and Redis URL are needed to reconnect to the stored data. Never commit or share them. The API image currently includes the workspace toolchain so the same image can run checked-in Prisma migrations; the server process itself starts the compiled API.
+
+For local development, copy the secret script output into the same checkout and use the same Compose commands. The API health check stays unhealthy until both baseline migrations have been applied.
+
+## Existing Caddy integration
+
+The current Caddy container uses host networking and reads `/home/ubuntu/n8n/Caddyfile`. Preserve its existing site blocks. Choose the API hostname after DNS is pointed at the VPS, append the site block from `infrastructure/caddy/messaging-api.caddy` with that literal hostname, then validate before reloading:
+
+```bash
+docker exec caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+docker exec caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
+```
+
+The proxy reaches the API at `127.0.0.1:4080`; no new public listener is created. These commands are instructions only and have not been run on the VPS.
+
+## Refresh the host inventory
+
+The deployment plan uses the inventory already collected for this VPS. Rerun `bash infrastructure/scripts/oracle-inventory.sh` over the usual SSH session before deployment if the host has changed. It reports CPU architecture and count, RAM, swap, root disk capacity, Docker and Compose versions, container names, ports and disk usage. The command reads the host and does not change application state.
 
 Review who owns ports 80 and 443, the current reverse-proxy site configuration, available memory and free disk space. Record the existing n8n and Hermes health and routing before choosing limits for the messaging stack. Keep credentials and private hostnames out of any shared output.
 
@@ -18,7 +50,7 @@ The native release entry point works on a dedicated application checkout with No
 
 ## Proxy integration after inventory review
 
-`infrastructure/caddy/messaging-api.caddy` contains one site block. It does not select a production domain or upstream. Set `MESSAGING_API_DOMAIN` to the chosen API hostname and `MESSAGING_API_UPSTREAM` to an address reachable from the actual proxy. Loopback resolves inside the proxy's own network namespace.
+`infrastructure/caddy/messaging-api.caddy` contains one site block. Replace its hostname with the chosen API hostname. The current Caddy container uses host networking, so it can reach the API published on host loopback at `127.0.0.1:4080`.
 
 For an existing Caddy deployment, review the merged configuration and validate it with the same Caddy binary and environment as the running proxy. A different existing proxy can route the hostname to the same private API upstream. Choose DNS, certificate handling and any proxy reload only after inspecting the current setup.
 
@@ -33,4 +65,4 @@ For an existing Caddy deployment, review the merged configuration and validate i
 | Compare pre/post routing and health for n8n and Hermes | Same routes and healthy services |
 | Review published listeners and volumes | PostgreSQL, Redis and future private media are reachable only by intended services |
 
-The Oracle rollout awaits the host inventory, finalized Compose configuration and an authorized deployment session. No cloud credentials are included in this repository.
+The Compose configuration is prepared but has not been deployed. Before rollout, recheck disk space, finalize the API hostname and DNS, and follow the acceptance checks above. No cloud credentials are included in this repository.

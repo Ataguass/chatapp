@@ -46,8 +46,10 @@ test("a session cannot use another account's device", () => fixture(async tx => 
   const owner = await user(tx);
   const other = await user(tx);
   const device = await tx.userDevice.create({ data: { userId: owner.id, platform: "web", deviceName: "Fixture" } });
+  const now = Date.now();
   await assert.rejects(tx.userSession.create({ data: { userId: other.id, deviceId: device.id,
-    refreshTokenHash: "0".repeat(64), expiresAt: new Date(Date.now() + 3600000) } }), { code: "P2003" });
+    accessTokenHash: "1".repeat(64), accessExpiresAt: new Date(now + 1800000),
+    refreshTokenHash: "0".repeat(64), expiresAt: new Date(now + 3600000) } }), { code: "P2003" });
 }));
 
 test("a direct pair can have only one conversation", () => fixture(async tx => {

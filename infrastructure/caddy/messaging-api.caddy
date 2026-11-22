@@ -1,4 +1,5 @@
-# Site block for the reviewed proxy configuration. Set both variables on the proxy.
+# Add this site block to the existing Caddyfile after replacing the hostname.
+# The API is published on host loopback at 127.0.0.1:4080.
 {$MESSAGING_API_DOMAIN} {
-	reverse_proxy {$MESSAGING_API_UPSTREAM}
+	reverse_proxy 127.0.0.1:4080
 }

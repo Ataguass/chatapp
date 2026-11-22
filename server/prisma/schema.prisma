@@ -20,6 +20,28 @@ enum MemberRole {
   @@map("member_role")
 }
 
+enum MessageType {
+  text
+  image
+  video
+  audio
+  document
+  @@map("message_type")
+}
+
+enum MediaCategory {
+  image
+  video
+  audio
+  document
+  @@map("media_category")
+}
+
+enum PushProvider {
+  fcm
+  @@map("push_provider")
+}
+
 model User {
   id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   username     String   @unique @db.VarChar(32)
@@ -34,6 +56,10 @@ model User {
   directSecond DirectConversation[] @relation("DirectSecond")
   blocks       UserBlock[] @relation("Blocker")
   blockedBy    UserBlock[] @relation("Blocked")
+  reactions    MessageReaction[]
+  groupInvitations GroupInvitation[]
+  uploadedAttachments Attachment[]
+  pushTokens PushToken[]
   @@map("users")
 }
 
@@ -45,6 +71,7 @@ model UserDevice {
   lastSeenAt DateTime @default(now()) @map("last_seen_at") @db.Timestamptz(3)
   user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   sessions   UserSession[]
+  pushTokens PushToken[]
   @@unique([id, userId])
   @@index([userId])
   @@map("user_devices")
@@ -54,6 +81,8 @@ model UserSession {
   id               String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   userId           String     @map("user_id") @db.Uuid
   deviceId         String     @map("device_id") @db.Uuid
+  accessTokenHash  String     @unique @map("access_token_hash") @db.Char(64)
+  accessExpiresAt  DateTime   @map("access_expires_at") @db.Timestamptz(3)
   refreshTokenHash String     @unique @map("refresh_token_hash") @db.Char(64)
   createdAt        DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
   expiresAt        DateTime   @map("expires_at") @db.Timestamptz(3)
@@ -82,6 +111,8 @@ model Conversation {
   createdAt DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
   members   ConversationMember[]
   direct    DirectConversation?
+  invitations GroupInvitation[]
+  attachments Attachment[]
   @@map("conversations")
 }
 
@@ -106,6 +137,8 @@ model ConversationMember {
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   user           User         @relation(fields: [userId], references: [id], onDelete: Restrict)
   messages       Message[]
+  reactions      MessageReaction[]
+  readCursor     ConversationReadCursor?
   @@id([conversationId, userId])
   @@index([userId, leftAt])
   @@map("conversation_members")
@@ -117,11 +150,94 @@ model Message {
   senderId        String             @map("sender_id") @db.Uuid
   clientMessageId String             @map("client_message_id") @db.Uuid
   content         String
+  type            MessageType         @default(text) @map("type")
+  attachmentId    String?             @unique @map("attachment_id") @db.Uuid
+  replyToMessageId String?            @map("reply_to_message_id") @db.Uuid
   createdAt       DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
   editedAt        DateTime?          @map("edited_at") @db.Timestamptz(3)
   deletedAt       DateTime?          @map("deleted_at") @db.Timestamptz(3)
   sender          ConversationMember @relation(fields: [conversationId, senderId], references: [conversationId, userId], onDelete: Cascade)
+  replyTo         Message?           @relation("MessageReplies", fields: [replyToMessageId], references: [id], onDelete: SetNull)
+  attachment      Attachment?        @relation(fields: [attachmentId], references: [id], onDelete: Restrict)
+  replies         Message[]          @relation("MessageReplies")
+  reactions       MessageReaction[]
   @@unique([conversationId, senderId, clientMessageId])
+  @@unique([conversationId, id])
   @@index([conversationId, createdAt, id])
   @@map("messages")
+}
+
+model Attachment {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  conversationId String       @map("conversation_id") @db.Uuid
+  uploadedBy     String       @map("uploaded_by") @db.Uuid
+  storageKey     String       @unique @map("storage_key") @db.VarChar(36)
+  fileName       String       @map("file_name") @db.VarChar(255)
+  contentType    String       @map("content_type") @db.VarChar(127)
+  category       MediaCategory
+  sizeBytes      BigInt       @map("size_bytes")
+  sha256         String       @db.Char(64)
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  uploader       User         @relation(fields: [uploadedBy], references: [id], onDelete: Restrict)
+  message        Message?
+  @@index([conversationId, createdAt])
+  @@map("attachments")
+}
+
+model PushToken {
+  id        String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String       @map("user_id") @db.Uuid
+  deviceId  String       @map("device_id") @db.Uuid
+  provider  PushProvider @default(fcm)
+  token     String       @unique @db.VarChar(4096)
+  createdAt DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  device    UserDevice   @relation(fields: [deviceId, userId], references: [id, userId], onDelete: Cascade)
+  @@index([userId])
+  @@index([deviceId, userId])
+  @@map("push_tokens")
+}
+
+model MessageReaction {
+  conversationId String             @map("conversation_id") @db.Uuid
+  messageId      String             @map("message_id") @db.Uuid
+  userId         String             @map("user_id") @db.Uuid
+  emoji          String             @db.VarChar(16)
+  createdAt      DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  message        Message            @relation(fields: [conversationId, messageId], references: [conversationId, id], onDelete: Cascade)
+  member         ConversationMember @relation(fields: [conversationId, userId], references: [conversationId, userId], onDelete: Cascade)
+  user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@id([messageId, userId, emoji])
+  @@index([conversationId, messageId, emoji])
+  @@map("message_reactions")
+}
+
+model ConversationReadCursor {
+  conversationId             String             @map("conversation_id") @db.Uuid
+  userId                     String             @map("user_id") @db.Uuid
+  lastReadMessageId          String             @map("last_read_message_id") @db.Uuid
+  lastReadMessageCreatedAt   DateTime           @map("last_read_message_created_at") @db.Timestamptz(3)
+  readAt                     DateTime           @default(now()) @map("read_at") @db.Timestamptz(3)
+  member                     ConversationMember @relation(fields: [conversationId, userId], references: [conversationId, userId], onDelete: Cascade)
+  @@id([conversationId, userId])
+  @@index([userId, readAt])
+  @@map("conversation_read_cursors")
+}
+
+model GroupInvitation {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  conversationId String       @map("conversation_id") @db.Uuid
+  createdBy      String       @map("created_by") @db.Uuid
+  tokenHash      String       @unique @map("token_hash") @db.Char(64)
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  expiresAt      DateTime     @map("expires_at") @db.Timestamptz(3)
+  maxUses        Int          @default(100) @map("max_uses")
+  useCount       Int          @default(0) @map("use_count")
+  revokedAt      DateTime?    @map("revoked_at") @db.Timestamptz(3)
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  creator        User         @relation(fields: [createdBy], references: [id], onDelete: Cascade)
+  @@index([conversationId, createdAt])
+  @@map("group_invitations")
 }

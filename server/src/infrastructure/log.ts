@@ -1,10 +1,11 @@
 type Fields = {
   requestId?: string;
-  route?: "live" | "ready" | "unmatched";
+  route?: "live" | "ready" | "auth" | "users" | "push" | "conversations" | "messages" | "unmatched";
   status?: number;
   durationMs?: number;
   port?: number;
   dependency?: "postgresql" | "redis";
+  count?: number;
   signal?: string;
   reason?: string;
 };

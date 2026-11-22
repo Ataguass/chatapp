@@ -1,6 +1,6 @@
 # Messaging platform
 
-Milestone 1 contains the runnable HTTP service, shared health contract and PostgreSQL migrations for the private messaging platform. The server listens on loopback by default. Its two public routes report liveness and readiness. Product routes and clients begin with the messaging MVP.
+The backend foundation includes username/password authentication, profiles and discovery, user blocking, direct and private group conversations, invitation links, persistent messaging with private media attachments, basic FCM push notifications, read receipts, replies, reactions, edits and soft deletion. The server listens on loopback by default; Docker publishes it only on host loopback behind the existing Caddy proxy.
 
 ## Start locally
 
@@ -39,19 +39,33 @@ GitHub Actions repeats the build, migrations, real-service tests and smoke check
 | Path | Responsibility |
 | --- | --- |
 | `server/src` | Express app, settings, database and cache probes, lifecycle and structured logs |
-| `server/prisma` | PostgreSQL schema and two transactional baseline migrations |
+| `server/src/modules/auth` | Password hashing, token sessions and authentication routes |
+| `server/src/modules/users` | Profiles, username search and user blocking |
+| `server/src/modules/conversations` | Direct and group conversation creation, membership, roles and invitation links |
+| `server/src/modules/messages` | Text and media messages, private attachment storage, read receipts, replies, reactions, edits and deletion |
+| `server/prisma` | PostgreSQL schema and transactional migrations for identity, conversations, messaging and group invites |
 | `server/test` | Core, HTTP and service integration tests |
-| `packages/shared-types` | Health response types shared with future clients |
+| `packages/shared-types` | Shared health, account, conversation, group and message contracts |
 | `infrastructure/caddy` | Isolated API site block for review with the existing proxy configuration |
 | `infrastructure/scripts` | Read-only Oracle inventory, release preparation and deployment checks |
 | `.github/workflows` | CI for the foundation |
 
+## MVP API
+
+See [API contracts](docs/api.md) for authentication, profile, conversation and message endpoints.
+
+## Cost policy
+
+Keep the MVP on free tiers and the existing VPS. Firebase Cloud Messaging is the free-first push provider for Android and web; defer iOS remote push until an Apple Developer account is available. Do not add paid services or upgrade Firebase billing without discussing it first.
+
 ## Oracle handoff
 
-Run the inventory script on the VPS that hosts n8n and Hermes.
+The inventory script can be rerun on the VPS before deployment or after host changes.
 
 ```bash
 bash infrastructure/scripts/oracle-inventory.sh
 ```
 
-The Compose manifest, port bindings, resource budgets and proxy integration depend on that output. The exact deployment sequence and remaining acceptance checks are in [Deployment](docs/deployment.md). Local verification results are in [Verification](docs/verification.md).
+The inventory has been reviewed. The Compose manifest, resource budgets and proxy integration are documented in [Deployment](docs/deployment.md). Local verification results are in [Verification](docs/verification.md).
+
+The isolated [Docker Compose deployment](docs/deployment.md#compose-deployment) uses a private PostgreSQL/Redis pair and exposes only the API on host loopback for the existing Caddy proxy. It has not been deployed to the VPS.
