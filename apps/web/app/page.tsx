@@ -73,28 +73,22 @@ function AuthScreen({ onAuthenticated, notice }: { onAuthenticated: (user: Publi
   return <main className="auth-screen">
     <section className="auth-story">
       <div className="brand brand-light"><span className="brand-mark"><Icon name="message" size={19} /></span><span>chatapp</span></div>
-      <div className="story-copy">
-        <span className="eyebrow">YOUR PEOPLE, IN ONE PLACE</span>
-        <h1>Good conversations<br />make the day.</h1>
-        <p>A quieter space for the people and moments that matter.</p>
-      </div>
-      <div className="story-note"><div className="note-avatars"><Avatar name="Maya Chen" size="sm" /><Avatar name="Noah James" size="sm" /><Avatar name="Aisha Khan" size="sm" /></div><span>Private chats. Your own little corner.</span></div>
+      <div className="story-copy"><h1>Private messaging</h1><p>Chats, stories, and calls with the people you choose.</p></div>
       <div className="story-orbit orbit-one" /><div className="story-orbit orbit-two" />
     </section>
     <section className="auth-panel">
       <div className="auth-form-wrap">
-        <div className="auth-heading"><span className="eyebrow">WELCOME {mode === "login" ? "BACK" : "ABOARD"}</span><h2>{mode === "login" ? "Sign in to chat" : "Create your account"}</h2><p>{mode === "login" ? "Pick up where your conversations left off." : "Choose a username your friends can find."}</p></div>
+        <div className="auth-heading"><span className="mobile-auth-brand">Chatapp</span><h2>{mode === "login" ? "Sign in to Chatapp" : "Create your account"}</h2>{mode === "register" && <p>Choose a username your friends can find.</p>}</div>
         {(recovered || notice) && <p className="dialog-feedback" role="status">{recovered ? "Password reset. Sign in with your new password, then generate new recovery codes in Settings." : notice}</p>}
         <form className="auth-form" onSubmit={submit}>
           {mode === "register" && <label>Display name<input autoComplete="name" value={displayName} onChange={event => setDisplayName(event.target.value)} placeholder="What should we call you?" maxLength={100} /></label>}
           <label>Username<input autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} placeholder="your_username" minLength={3} maxLength={32} required /></label>
-          <label>Password<input type="password" autoComplete={mode === "login" ? "current-password" : "new-password"} value={password} onChange={event => setPassword(event.target.value)} placeholder="At least 12 characters" minLength={12} maxLength={128} required /></label>
+          <label>Password<input type="password" autoComplete={mode === "login" ? "current-password" : "new-password"} value={password} onChange={event => setPassword(event.target.value)} placeholder={mode === "register" ? "At least 12 characters" : undefined} minLength={12} maxLength={128} required /></label>
           {error && <p className="form-error" role="alert">{error}</p>}
           <button className="primary-button auth-submit" disabled={busy}>{busy ? <span className="spinner" /> : null}{mode === "login" ? "Sign in" : "Create account"}</button>
         </form>
         {mode === "login" && <p className="auth-switch"><button type="button" onClick={() => setRecovering(true)}>Forgot password?</button></p>}
         <p className="auth-switch">{mode === "login" ? "New around here?" : "Already have an account?"} <button type="button" onClick={() => { setMode(mode === "login" ? "register" : "login"); setError(""); }}>{mode === "login" ? "Create an account" : "Sign in"}</button></p>
-        <p className="auth-privacy">Your conversations are private to you and the people in them.</p>
       </div>
     </section>
     {recovering && <RecoveryDialog initialUsername={username} onClose={() => setRecovering(false)} onRecovered={name => {
@@ -112,6 +106,9 @@ function authError(code: string) {
     invalid_username: "Use 3–32 letters, numbers, or underscores.",
     invalid_password: "Choose a password with at least 12 characters.",
     conversation_closed: "This chat is read-only because the other account was deleted.",
+    conversation_access_denied: "You no longer have access to this conversation.",
+    messaging_blocked: "Messaging is unavailable in this chat.",
+    reply_target_not_found: "That message is no longer available. Cancel the reply and try again.",
     attachment_too_large: "This file exceeds the upload limit for its type.",
     unsupported_media_type: "Choose an image, MP4 video, MP3/WAV audio file, or PDF.",
     media_signature_mismatch: "The file contents don't match the selected file type.",
@@ -238,6 +235,7 @@ export default function Home() {
     setUser(null); setConversations([]); setSelectedId(null); setTimelines({}); setUnread({});
     setDraft(""); setNotice(""); setSidebarQuery(""); setModal(null); setMobileChatOpen(false); setWorkspace("chats"); setOlderCursors({});
     setStoriesOpen(false); setInvitation(null);
+    window.history.replaceState(null, "", window.location.pathname + window.location.search + "#chats");
     setAccountNotice(feedback);
   }, []);
 
@@ -423,17 +421,18 @@ export default function Home() {
           if (!result.ok) throw new Error(result.error);
         }
         if (signal.aborted) return;
-        let cursor = syncCursors.current.get(id);
-        if (cursor === undefined) {
+        const savedCursor = syncCursors.current.get(id);
+        let cursor: string;
+        if (savedCursor === undefined) {
           const baseline = await api<MessageSyncPage>(`conversations/${id}/sync`, { signal });
           const page = await api<MessagePage>(`conversations/${id}/messages?limit=50`, { signal });
           if (signal.aborted) return;
           cursor = baseline.cursor;
           addMessages(id, page.messages);
           setOlderCursors(current => ({ ...current, [id]: page.nextCursor }));
-        }
+        } else cursor = savedCursor;
         while (!signal.aborted) {
-          const changes = await api<MessageSyncPage>(`conversations/${id}/sync?after=${encodeURIComponent(cursor)}`, { signal });
+          const changes: MessageSyncPage = await api<MessageSyncPage>(`conversations/${id}/sync?after=${encodeURIComponent(cursor)}`, { signal });
           if (signal.aborted) return;
           removeHidden(id, changes.removedMessageIds);
           addMessages(id, changes.messages);
@@ -792,6 +791,7 @@ export default function Home() {
         }}>
           {!!olderCursors[selected.id] && <div className="chat-date"><button className="quiet-button" type="button" disabled={olderLoading} onClick={() => void loadOlder()}>{olderLoading ? "Loading…" : "Load earlier messages"}</button></div>}
           {!messages.length && !historyLoading && <div className="chat-date"><span>No messages yet</span></div>}
+          {!!messages.length && <div className="message-spacer" aria-hidden="true" />}
           {messages.map(message => {
             const mine = message.senderId === user.id;
             const checked = selectedMessages.includes(message.id);
@@ -897,7 +897,7 @@ function PeopleModal({ mode, onClose, onStart, onCreateGroup, busy }: {
 
   useEffect(() => {
     const value = query.trim();
-    if (value.length < 2) { setPeople([]); setError(""); return; }
+    if (value.length < 2) { setPeople([]); setSearching(false); setError(""); return; }
     let active = true;
     const timer = setTimeout(() => {
       setSearching(true);
@@ -909,31 +909,12 @@ function PeopleModal({ mode, onClose, onStart, onCreateGroup, busy }: {
     return () => { active = false; clearTimeout(timer); };
   }, [query]);
 
-  useEffect(() => {
-    function escape(event: globalThis.KeyboardEvent) { if (event.key === "Escape") onClose(); }
-    window.addEventListener("keydown", escape);
-    return () => window.removeEventListener("keydown", escape);
-  }, [onClose]);
-
   function toggle(person: PublicUser) {
     setPicked(current => current.some(item => item.id === person.id) ? current.filter(item => item.id !== person.id) : [...current, person]);
   }
 
-  function keepFocusInDialog(event: KeyboardEvent<HTMLElement>) {
-    if (event.key !== "Tab") return;
-    const controls = [...event.currentTarget.querySelectorAll<HTMLElement>(
-      'button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex="-1"])',
-    )].filter(control => control.offsetParent !== null);
-    const first = controls[0];
-    const last = controls.at(-1);
-    if (!first || !last) return;
-    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
-  }
-
-  return <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
-    <section className="people-modal" role="dialog" aria-modal="true" aria-labelledby="people-modal-title" onKeyDown={keepFocusInDialog}>
-      <div className="modal-head"><div><span className="eyebrow">{mode === "chat" ? "START SOMETHING NEW" : "BRING YOUR PEOPLE TOGETHER"}</span><h2 id="people-modal-title">{mode === "chat" ? "Find a person" : "Create a group"}</h2></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={onClose}><Icon name="close" /></button></div>
+  return <ChatDialog title={mode === "chat" ? "Find a person" : "Create a group"} onClose={() => { if (!busy) onClose(); }}>
+    <section className="people-modal-content">
       {mode === "group" && <label className="group-title-field">Group name<input value={title} onChange={event => setTitle(event.target.value)} maxLength={120} placeholder="Weekend plans" /></label>}
       <label className="search-box modal-search"><Icon name="search" size={18} /><input autoFocus value={query} onChange={event => setQuery(event.target.value)} placeholder="Search by username" aria-label="Search by username" /></label>
       <p className="field-hint">Enter at least 2 letters of a username.</p>
@@ -951,5 +932,5 @@ function PeopleModal({ mode, onClose, onStart, onCreateGroup, busy }: {
       </div>
       {mode === "group" && <div className="modal-footer"><span>{picked.length} member{picked.length === 1 ? "" : "s"} selected</span><button className="primary-button" type="button" disabled={busy || !title.trim() || !picked.length} onClick={() => onCreateGroup(title.trim(), picked)}>{busy ? "Creating…" : "Create group"}</button></div>}
     </section>
-  </div>;
+  </ChatDialog>;
 }

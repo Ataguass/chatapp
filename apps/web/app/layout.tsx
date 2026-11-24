@@ -6,7 +6,7 @@ export const metadata: Metadata = {
   description: "A quiet, private place to talk with your people.",
 };
 
-export const viewport: Viewport = { themeColor: "#f6f8fb", width: "device-width", initialScale: 1 };
+export const viewport: Viewport = { themeColor: "#f4f7fb", width: "device-width", initialScale: 1, viewportFit: "cover" };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return <html lang="en"><body>{children}</body></html>;

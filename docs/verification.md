@@ -35,4 +35,21 @@ The Linux production API and web images built successfully. The backend passed 1
 | Direct calls | Two local WebSocket clients established signaling. Call history was private, and blocking ended the selected call. |
 | Compiled web proxy | Secure HttpOnly cookies, device listing, story publishing and password-change cookie clearing passed. |
 
-These checks used local infrastructure. Firebase delivery to a real device and TURN media relay across networks require separate environment verification.
+These checks used local infrastructure. Firebase delivery to a real device and TURN relay between Wi-Fi and cellular clients require separate environment verification.
+
+## Chat UI and calling verification
+
+The production web build was exercised in Chromium at desktop, tablet, 375 px phone, and phone landscape sizes. The browser checks covered sending and replying, forwarding, both deletion scopes, saving a profile, notification preferences, device revocation, group invitation redemption, and publishing a story.
+
+For the direct-call test, each browser ran on its own isolated Docker network. Both fetched short-lived credentials from Chatapp's `/v1/calls/ice` API. With WebRTC forced to use relay candidates, each browser selected a Coturn UDP relay pair and received audio RTP. In the video test, both browsers also decoded video frames. Both calls appeared in call history. A physical phone on cellular data remains a separate test.
+
+### LiveKit capacity sample
+
+LiveKit 1.13.11 ran locally with a two-CPU and 1 GiB container limit. The official LiveKit CLI 2.20.1 ran each VP8 workload for 25 seconds with the 3×3 subscriber layout. CPU and memory peaks below are sampled Docker readings. Throughput is the CLI's combined receive bitrate across subscribers.
+
+| Audio and video publishers | Subscribers | Tracks received | Packet loss | Sampled peak CPU | Sampled peak memory | Subscriber throughput |
+| --- | --- | --- | --- | --- | --- | --- |
+| 3 | 3 | 18 of 18 | 0% | 21.7% | 80 MiB | 14.0 Mbps |
+| 6 | 6 | 72 of 72 | 0% | 39.5% | 115 MiB | 25.4 Mbps |
+
+These measurements come from Docker Desktop on a local x86-64 host. Benchmark the Oracle VPS during normal n8n and Hermes activity before enabling group video there. [LiveKit load-test reference](https://docs.livekit.io/reference/developer-tools/livekit-cli/perf/)

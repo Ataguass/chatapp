@@ -79,7 +79,7 @@ export function ChatSettings({ user, compact, onDensityChange, onSave, onSignOut
     {error && <p className="workspace-feedback is-error" role="alert">{error} {section !== "Profile" && <button type="button" className="text-button" onClick={() => { setError(""); setRevision(value => value + 1); }}>Refresh</button>}</p>}
     {section === "Profile" && <>
       <div className="workspace-card workspace-settings-card">
-        <div className="profile-summary"><Avatar name={user.displayName} size="lg" /><div><h2>{user.displayName}</h2><p>@{user.username}</p></div></div>
+        <div className="profile-summary"><Avatar name={user.displayName} src={user.avatarUrl} size="lg" /><div><h2>{user.displayName}</h2><p>@{user.username}</p></div></div>
         <form className="account-form" onSubmit={save} aria-busy={busy}>
           <label>Display name<input autoComplete="name" value={displayName} maxLength={100} required onChange={event => setDisplayName(event.target.value)} /></label>
           <label>Bio<textarea value={bio} maxLength={500} rows={3} onChange={event => setBio(event.target.value)} /></label>
@@ -113,8 +113,12 @@ export function ChatSettings({ user, compact, onDensityChange, onSave, onSignOut
       <label className="account-toggle"><input type="checkbox" checked={pushEnabled === true} disabled={loading || busy || pushEnabled === null} onChange={event => {
         const checked = event.target.checked;
         void run(async () => {
-          const result = await api<{ pushEnabled: boolean }>("push/preferences", { method: "PATCH", body: JSON.stringify({ pushEnabled: checked }) });
-          setPushEnabled(result.pushEnabled); setFeedback("Notification preference saved.");
+          const previous = pushEnabled;
+          setPushEnabled(checked);
+          try {
+            const result = await api<{ pushEnabled: boolean }>("push/preferences", { method: "PATCH", body: JSON.stringify({ pushEnabled: checked }) });
+            setPushEnabled(result.pushEnabled); setFeedback("Notification preference saved.");
+          } catch (error) { setPushEnabled(previous); throw error; }
         }, "Couldn't update notifications.");
       }} /> Allow push notifications</label>
       <p>This preference applies across your devices. You can mute individual conversations from the chat header.</p>
@@ -123,14 +127,15 @@ export function ChatSettings({ user, compact, onDensityChange, onSave, onSignOut
       <h2>Connected devices</h2>
       {!devices.length && <p>{loading ? "Loading devices…" : "No devices to show."}</p>}
       {devices.map(device => <div className="workspace-row" key={device.id}><span className="device-symbol"><Icon name="shield" size={18} /></span><div className="workspace-row-copy"><strong>{device.deviceName}{device.current ? " · This device" : ""}</strong><span>{device.platform} · Active {new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(device.lastSeenAt))}</span></div>
-        {!device.current && <button type="button" className="quiet-button" disabled={busy} onClick={() => setRevokeDevice(device)}>Sign out device</button>}</div>)}
+        {!device.current && <button type="button" className="quiet-button" disabled={busy} onClick={() => { setError(""); setRevokeDevice(device); }}>Sign out device</button>}</div>)}
       <div className="dialog-actions">
         <button className="quiet-button" type="button" disabled={busy} onClick={() => void run(() => onSignOut(false), "Couldn't sign out.")}>Sign out</button>
-        <button className="quiet-button" type="button" disabled={busy} onClick={() => setConfirmSignOut(true)}>Sign out on all devices</button>
+        <button className="quiet-button" type="button" disabled={busy} onClick={() => { setError(""); setConfirmSignOut(true); }}>Sign out on all devices</button>
       </div>
     </section>}
     {revokeDevice && <ChatDialog title="Sign out this device?" onClose={() => { if (!busy) setRevokeDevice(null); }}>
       <p className="dialog-description">{revokeDevice.deviceName} will need to sign in again.</p>
+      {error && <p className="form-error" role="alert">{error}</p>}
       <div className="dialog-actions"><button className="quiet-button" type="button" disabled={busy} onClick={() => setRevokeDevice(null)}>Cancel</button>
         <button className="danger-button" type="button" disabled={busy} onClick={() => void run(async () => {
           await api(`users/me/devices/${revokeDevice.id}`, { method: "DELETE" });
@@ -140,6 +145,7 @@ export function ChatSettings({ user, compact, onDensityChange, onSave, onSignOut
     </ChatDialog>}
     {confirmSignOut && <ChatDialog title="Sign out everywhere?" onClose={() => { if (!busy) setConfirmSignOut(false); }}>
       <p className="dialog-description">Every device, including this one, will need to sign in again.</p>
+      {error && <p className="form-error" role="alert">{error}</p>}
       <div className="dialog-actions"><button className="quiet-button" type="button" disabled={busy} onClick={() => setConfirmSignOut(false)}>Cancel</button>
         <button className="danger-button" type="button" disabled={busy} onClick={() => void run(() => onSignOut(true), "Couldn't sign out every device.")}>Sign out everywhere</button></div>
     </ChatDialog>}

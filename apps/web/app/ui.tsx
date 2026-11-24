@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 function initials(name: string) {
   return name.trim().split(/\s+/).slice(0, 2).map(part => part.charAt(0).toUpperCase()).join("") || "?";
@@ -8,9 +8,11 @@ function colorIndex(name: string) {
   return [...name].reduce((sum, char) => sum + char.charCodeAt(0), 0) % 6;
 }
 
-export function Avatar({ name, size = "md", online = false }: { name: string; size?: "sm" | "md" | "lg"; online?: boolean }) {
+export function Avatar({ name, size = "md", online = false, src }: { name: string; size?: "sm" | "md" | "lg"; online?: boolean; src?: string | null }) {
+  const [failed, setFailed] = useState<string | null>(null);
   return <span className={`avatar avatar-${size} avatar-tone-${colorIndex(name)}`} role="img" aria-label={online ? `${name}, online` : name}>
-    {initials(name)}{online && <i className="online-dot" aria-hidden="true" />}
+    {src && src !== failed ? <img src={src} alt="" referrerPolicy="no-referrer" onError={() => setFailed(src)} /> : initials(name)}
+    {online && <i className="online-dot" aria-hidden="true" />}
   </span>;
 }
 
