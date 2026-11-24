@@ -5,6 +5,7 @@ import { requireAuth } from "../auth/router.ts";
 import type { AuthService } from "../auth/router.ts";
 import type { AuthContext } from "../auth/service.ts";
 import type { ProfilePatch, UserService } from "./service.ts";
+import type { DeviceService } from "./devices.ts";
 
 function uuid(value: string) {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
@@ -44,7 +45,9 @@ function profilePatch(value: unknown): ProfilePatch {
   return patch;
 }
 
-export function createUsersRouter(auth: AuthService, users: UserService) {
+export function createUsersRouter(auth: AuthService, users: UserService,
+  devices?: DeviceService, publishDeviceRevoked?: (userId: string, deviceId: string) => void,
+  publishBlock?: (viewerId: string, targetId: string, conversationId: string) => void) {
   const router = Router();
   const authenticated = requireAuth(auth);
 
@@ -61,8 +64,29 @@ export function createUsersRouter(auth: AuthService, users: UserService) {
     res.json(await users.updateProfile(context(res).user.id, profilePatch(req.body)));
   });
 
+  router.get("/me/blocks", authenticated, async (req, res) => {
+    const { cursor } = req.query;
+    if (cursor !== undefined && typeof cursor !== "string") throw new HttpError(400, "invalid_cursor");
+    res.json(await users.listBlocks(context(res).user.id, cursor === undefined ? undefined : uuid(cursor)));
+  });
+
+  if (devices) {
+    router.get("/me/devices", authenticated, async (_req, res) => {
+      res.json(await devices.list(context(res)));
+    });
+    router.delete("/me/devices/:deviceId", authenticated, async (req, res) => {
+      const account = context(res);
+      await devices.revoke(account, req.params.deviceId);
+      publishDeviceRevoked?.(account.user.id, req.params.deviceId.toLowerCase());
+      res.status(204).end();
+    });
+  }
+
   router.post("/:id/block", authenticated, async (req, res) => {
-    await users.block(context(res).user.id, uuid(req.params.id));
+    const viewer = context(res).user.id;
+    const target = uuid(req.params.id).toLowerCase();
+    const direct = await users.block(viewer, target);
+    if (direct) publishBlock?.(viewer, target, direct.conversationId);
     res.status(204).end();
   });
 

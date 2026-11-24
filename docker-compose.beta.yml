@@ -1,0 +1,35 @@
+services:
+  api:
+    environment:
+      SOCKET_ALLOWED_ORIGINS: ${CHAT_WEB_ORIGIN:?Set CHAT_WEB_ORIGIN to the beta HTTPS origin}
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    environment:
+      CHAT_WEB_ORIGIN: ${CHAT_WEB_ORIGIN:?Set CHAT_WEB_ORIGIN to the beta HTTPS origin}
+      MESSAGING_API_URL: http://api:4080
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${CHAT_WEB_HOST_PORT:-4300}:4300"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4300/').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 4s
+      retries: 3
+      start_period: 20s
+    cpus: 0.5
+    mem_limit: 384m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

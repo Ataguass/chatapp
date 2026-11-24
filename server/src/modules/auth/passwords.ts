@@ -1,15 +1,13 @@
 import { randomBytes, scrypt, timingSafeEqual } from "node:crypto";
 import type { ScryptOptions } from "node:crypto";
 
-const COST = 1 << 14;
 const BLOCK_SIZE = 8;
-const PARALLELISM = 1;
+const current = { N: 1 << 15, r: BLOCK_SIZE, p: 3, maxmem: 64 * 1024 * 1024 };
+const legacy = { ...current, N: 1 << 14, p: 1 };
 const KEY_LENGTH = 64;
-const MAX_MEMORY = 64 * 1024 * 1024;
 const DUMMY_SALT = Buffer.alloc(16, 0x5a);
-const options: ScryptOptions = { N: COST, r: BLOCK_SIZE, p: PARALLELISM, maxmem: MAX_MEMORY };
 
-function derive(password: string, salt: Buffer) {
+function derive(password: string, salt: Buffer, options: ScryptOptions = current) {
   return new Promise<Buffer>((resolve, reject) => {
     scrypt(password, salt, KEY_LENGTH, options, (error, key) => {
       if (error) reject(error);
@@ -18,16 +16,25 @@ function derive(password: string, salt: Buffer) {
   });
 }
 
+function prefix(options: typeof current) {
+  return `scrypt$${options.N}$${options.r}$${options.p}$`;
+}
+
 export async function hashPassword(password: string) {
   const salt = randomBytes(16);
   const key = await derive(password, salt);
-  return `scrypt$${COST}$${BLOCK_SIZE}$${PARALLELISM}$${salt.toString("base64url")}$${key.toString("base64url")}`;
+  return `${prefix(current)}${salt.toString("base64url")}$${key.toString("base64url")}`;
+}
+
+export function needsPasswordUpgrade(encoded: string) {
+  return encoded.startsWith(prefix(legacy));
 }
 
 export async function verifyPassword(password: string, encoded: string) {
   const parts = encoded.split("$");
-  if (parts.length !== 6 || parts[0] !== "scrypt" || parts[1] !== String(COST) ||
-      parts[2] !== String(BLOCK_SIZE) || parts[3] !== String(PARALLELISM)) {
+  const options = encoded.startsWith(prefix(current)) ? current :
+    needsPasswordUpgrade(encoded) ? legacy : null;
+  if (parts.length !== 6 || !options) {
     await derive(password, DUMMY_SALT);
     return false;
   }
@@ -38,7 +45,7 @@ export async function verifyPassword(password: string, encoded: string) {
       await derive(password, DUMMY_SALT);
       return false;
     }
-    const actual = await derive(password, salt);
+    const actual = await derive(password, salt, options);
     return timingSafeEqual(actual, expected);
   } catch {
     return false;

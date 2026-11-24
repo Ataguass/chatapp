@@ -3,6 +3,8 @@ import type { Request, Response, NextFunction } from "express";
 import type { AuthSessionResponse, DevicePlatform } from "@messaging/contracts";
 import { HttpError } from "./service.ts";
 import type { AuthContext, Credentials, DeviceDetails, Registration } from "./service.ts";
+import type { AuthThrottle } from "./throttle.ts";
+import type { AccountLifecycle } from "./account-lifecycle.ts";
 
 export type AuthService = {
   register(input: Registration): Promise<AuthSessionResponse>;
@@ -44,7 +46,9 @@ function credentials(value: unknown): Credentials {
   };
 }
 
-function bearer(req: Request) {
+type AuthorizationRequest = Pick<Request, "get">;
+
+function bearer(req: AuthorizationRequest) {
   const header = req.get("authorization");
   if (!header?.startsWith("Bearer ")) throw new HttpError(401, "unauthorized");
   const token = header.slice(7).trim();
@@ -53,7 +57,7 @@ function bearer(req: Request) {
 }
 
 export function requireAuth(auth: AuthService) {
-  return async (req: Request, res: Response, next: NextFunction) => {
+  return async (req: AuthorizationRequest, res: Response, next: NextFunction) => {
     try {
       res.locals.auth = await auth.authenticate(bearer(req));
       next();
@@ -63,8 +67,24 @@ export function requireAuth(auth: AuthService) {
   };
 }
 
-export function createAuthRouter(auth: AuthService) {
+export type AuthControls = {
+  throttle: AuthThrottle;
+  account: AccountLifecycle;
+  revokeSession: (sessionId: string) => void;
+  revokeUserSessions: (userId: string) => void;
+  accountRemoved: (conversationIds: string[]) => void;
+};
+
+export function createAuthRouter(auth: AuthService, controls?: AuthControls) {
   const router = Router();
+
+  async function enforceThrottle(action: Parameters<AuthThrottle>[0], req: Request, res: Response, username: string) {
+    const retry = await controls?.throttle(action, req.ip ?? req.socket.remoteAddress ?? "unknown", username);
+    if (retry) {
+      res.set("Retry-After", String(retry));
+      throw new HttpError(429, "auth_rate_limited");
+    }
+  }
 
   router.post("/register", async (req, res) => {
     const body = bodyObject(req.body);
@@ -74,11 +94,14 @@ export function createAuthRouter(auth: AuthService) {
         ? stringField(body, "username").trim().toLowerCase()
         : stringField(body, "displayName"),
     };
+    await enforceThrottle("register", req, res, input.username);
     res.status(201).json(await auth.register(input));
   });
 
   router.post("/login", async (req, res) => {
-    res.json(await auth.login(credentials(req.body)));
+    const input = credentials(req.body);
+    await enforceThrottle("login", req, res, input.username);
+    res.json(await auth.login(input));
   });
 
   router.post("/refresh", async (req, res) => {
@@ -91,15 +114,55 @@ export function createAuthRouter(auth: AuthService) {
   });
 
   router.post("/logout", requireAuth(auth), async (_req, res) => {
-    await auth.logout((res.locals as { auth: AuthContext }).auth);
+    const context = (res.locals as { auth: AuthContext }).auth;
+    await auth.logout(context);
+    controls?.revokeSession(context.sessionId);
     res.status(204).end();
   });
 
   router.post("/logout-all", requireAuth(auth), async (_req, res) => {
     const context = (res.locals as { auth: AuthContext }).auth;
     await auth.logoutAll(context.user.id);
+    controls?.revokeUserSessions(context.user.id);
     res.status(204).end();
   });
+
+  if (controls) {
+    router.post("/password", requireAuth(auth), async (req, res) => {
+      const context = (res.locals as { auth: AuthContext }).auth;
+      await enforceThrottle("account_change", req, res, context.user.username);
+      const body = bodyObject(req.body);
+      await controls.account.changePassword(context, stringField(body, "currentPassword"), stringField(body, "newPassword"));
+      controls.revokeUserSessions(context.user.id);
+      res.status(204).end();
+    });
+
+    router.post("/recovery-codes", requireAuth(auth), async (req, res) => {
+      const context = (res.locals as { auth: AuthContext }).auth;
+      await enforceThrottle("account_change", req, res, context.user.username);
+      const password = stringField(bodyObject(req.body), "password");
+      res.json({ codes: await controls.account.replaceRecoveryCodes(context, password) });
+    });
+
+    router.post("/password-reset", async (req, res) => {
+      const body = bodyObject(req.body);
+      const username = stringField(body, "username");
+      await enforceThrottle("recover", req, res, username);
+      const userId = await controls.account.resetPassword(username, stringField(body, "code"), stringField(body, "password"));
+      controls.revokeUserSessions(userId);
+      res.status(204).end();
+    });
+
+    router.delete("/account", requireAuth(auth), async (req, res) => {
+      const context = (res.locals as { auth: AuthContext }).auth;
+      const body = bodyObject(req.body);
+      await enforceThrottle("account_change", req, res, context.user.username);
+      const affected = await controls.account.deleteAccount(context, stringField(body, "username"), stringField(body, "password"));
+      controls.revokeUserSessions(context.user.id);
+      controls.accountRemoved(affected);
+      res.status(204).end();
+    });
+  }
 
   return router;
 }

@@ -18,4 +18,21 @@ The source was exercised on Linux x86-64 with Node.js 22.18.0, pnpm 10.32.1, Pri
 | Stop PostgreSQL, then restart it | Liveness 200 throughout the sampled outage, readiness 503 during the outage and 200 after reconnect |
 | SIGTERM after recovery | Clean process exit with status 0 |
 
-GitHub Actions configuration and shell syntax were checked locally. A hosted workflow run, Oracle deployment, public TLS and coexistence checks with n8n and Hermes require their respective environments. The product acceptance checks for registration, message delivery, uploads, device registration and push delivery still need to be run against the current release.
+GitHub Actions configuration and shell syntax were checked locally during the foundation milestone.
+
+## Backend release verification
+
+The Linux production API and web images built successfully. The backend passed 15 core and HTTP tests and 22 integration tests against disposable PostgreSQL 16 and Redis 7.4 containers.
+
+| Check | Observed result |
+| --- | --- |
+| Fresh migrations and upgrade from the ten-migration beta schema | All 18 migrations applied. Prisma found no schema drift. |
+| Upgrade with an existing chat message | The original ID and position survived. The sync endpoint returned subsequent edits. |
+| Device revocation and account changes | Old access and refresh tokens were rejected. Account deletion removed personal records and retained the peer's messages. |
+| Groups and reconnect | Invite limits and roles were enforced. Removed members lost history access. Edits, reactions, and personal deletions synchronized. |
+| Private media and stories | Tests covered oversize and invalid files, range requests, forwarding, audience checks, blocks and expiry. |
+| Notifications and administration | A test transport exercised durable retries. Mutes, read positions and blocks prevented dispatch. Admin routes enforced the configured privilege. |
+| Direct calls | Two local WebSocket clients established signaling. Call history was private, and blocking ended the selected call. |
+| Compiled web proxy | Secure HttpOnly cookies, device listing, story publishing and password-change cookie clearing passed. |
+
+These checks used local infrastructure. Firebase delivery to a real device and TURN media relay across networks require separate environment verification.

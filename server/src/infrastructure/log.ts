@@ -1,6 +1,7 @@
 type Fields = {
   requestId?: string;
-  route?: "live" | "ready" | "auth" | "users" | "push" | "conversations" | "messages" | "unmatched";
+  route?: "live" | "ready" | "auth" | "users" | "push" | "conversations" | "messages" | "stories" | "media" | "calls" |
+    "admin" | "reports" | "unmatched";
   status?: number;
   durationMs?: number;
   port?: number;

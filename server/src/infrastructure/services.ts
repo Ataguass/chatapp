@@ -14,8 +14,11 @@ export function openServices(config: ReturnType<typeof settings>, log: Logger) {
   redis.on("error", () => {});
   const health = createReadiness({
     postgresql: async () => {
-      // Readiness also requires the tables from both foundation migrations.
-      await db.$queryRaw`SELECT 1 FROM users, messages LIMIT 0`;
+      await db.$queryRaw`SELECT messages.position, users.deleted_at, users.push_enabled, conversation_members.push_muted
+        FROM users, messages, conversation_members, account_recovery_codes,
+        pending_media_deletions, conversation_sync_state, conversation_message_changes,
+        stories, story_privacy, story_views, conversation_delivery_cursors, message_push_jobs, direct_calls, message_deletions,
+        moderation_reports, media_policies LIMIT 0`;
     },
     redis: async () => { if (await redis.ping() !== "PONG") throw new Error("Redis probe failed"); },
   }, config.deadline, (dependency, ok) => log(ok ? "dependency.ready" : "dependency.unavailable", { dependency }));

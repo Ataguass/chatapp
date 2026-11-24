@@ -1,6 +1,11 @@
-FROM node:22.18.0-bookworm-slim
+FROM node:24.22.3-bookworm-slim
 
 WORKDIR /workspace
+
+# Prisma needs OpenSSL to select and run the matching Linux engine.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssl \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN corepack enable && corepack prepare pnpm@10.32.1 --activate
 

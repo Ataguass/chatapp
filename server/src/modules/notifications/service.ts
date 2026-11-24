@@ -1,15 +1,16 @@
 import { createSign } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { PrismaClient } from "@prisma/client";
-import { HttpError } from "../auth/service.ts";
+import { HttpError, type AuthContext } from "../auth/service.ts";
+import { lockActiveAccount } from "../auth/account-lock.ts";
 import type { Logger } from "../../infrastructure/log.ts";
 
 const googleTokenUrl = "https://oauth2.googleapis.com/token";
 const fcmScope = "https://www.googleapis.com/auth/firebase.messaging";
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 type ServiceAccount = { project_id: string; client_email: string; private_key: string };
 type FcmSettings = { projectId?: string; serviceAccountFile?: string };
+export type PushResult = { status: "sent" | "invalid" | "permanent" } | { status: "retry"; delayMs: number };
 
 function base64url(value: string | Buffer) {
   return Buffer.from(value).toString("base64url");
@@ -48,7 +49,7 @@ export function createNotificationService(db: PrismaClient, config: FcmSettings,
   let accessToken: { value: string; expiresAt: number } | undefined;
   let accessTokenPromise: Promise<string> | undefined;
 
-  async function googleAccessToken(serviceAccount: ServiceAccount) {
+  async function googleAccessToken(serviceAccount: ServiceAccount, stop: AbortSignal) {
     if (accessToken && accessToken.expiresAt > Date.now() + 60_000) return accessToken.value;
     accessTokenPromise ??= (async () => {
       const response = await fetch(googleTokenUrl, {
@@ -58,7 +59,7 @@ export function createNotificationService(db: PrismaClient, config: FcmSettings,
           grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
           assertion: signedAssertion(serviceAccount),
         }),
-        signal: AbortSignal.timeout(10_000),
+        signal: AbortSignal.any([stop, AbortSignal.timeout(10_000)]),
       });
       if (!response.ok) throw new Error("FCM OAuth request failed");
       const body = await response.json() as { access_token?: unknown; expires_in?: unknown };
@@ -71,42 +72,67 @@ export function createNotificationService(db: PrismaClient, config: FcmSettings,
     return accessTokenPromise;
   }
 
-  async function send(token: string, title: string, body: string, data: Record<string, string>) {
-    if (!serviceAccount || !config.projectId) return "disabled" as const;
-    const bearer = await googleAccessToken(serviceAccount);
+  async function send(token: string, data: Record<string, string>, stop: AbortSignal): Promise<PushResult> {
+    if (!serviceAccount || !config.projectId) return { status: "permanent" };
+    const bearer = await googleAccessToken(serviceAccount, stop);
     const response = await fetch(`https://fcm.googleapis.com/v1/projects/${encodeURIComponent(config.projectId)}/messages:send`, {
       method: "POST",
       headers: { Authorization: `Bearer ${bearer}`, "Content-Type": "application/json" },
       body: JSON.stringify({ message: {
         token,
-        notification: { title, body },
+        notification: { title: "New message", body: "Open Chatapp to view your message" },
         data,
         android: { priority: "high" },
         apns: { headers: { "apns-priority": "10" }, payload: { aps: { sound: "default" } } },
         webpush: { headers: { Urgency: "high" } },
       } }),
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.any([stop, AbortSignal.timeout(10_000)]),
     });
-    if (response.ok) return "sent" as const;
+    if (response.ok) return { status: "sent" };
     const error = await response.json().catch(() => null) as {
       error?: { status?: string; details?: Array<{ errorCode?: string }> };
     } | null;
     const invalid = error?.error?.details?.some(item => item.errorCode === "UNREGISTERED");
-    if (invalid) return "invalid" as const;
+    if (invalid) return { status: "invalid" };
+    if (response.status === 401) accessToken = undefined;
     log("push.delivery_failed", { status: response.status });
-    return "failed" as const;
+    if (response.status !== 429 && response.status < 500) return { status: "permanent" };
+    const retryAfter = response.headers.get("Retry-After") ?? "";
+    const parsed = /^\d+$/.test(retryAfter) ? Number(retryAfter) * 1000 : Date.parse(retryAfter) - Date.now();
+    return { status: "retry", delayMs: Number.isFinite(parsed) && parsed > 0 ? parsed : 60_000 };
   }
 
   return {
-    async register(userId: string, deviceId: string, value: unknown) {
+    enabled: Boolean(serviceAccount),
+    send,
+    async preferences(userId: string) {
+      const row = await db.user.findUnique({ where: { id: userId, deletedAt: null }, select: { pushEnabled: true } });
+      if (!row) throw new HttpError(401, "unauthorized");
+      return row;
+    },
+
+    async setPreferences(userId: string, pushEnabled: boolean) {
+      const changed = await db.user.updateMany({ where: { id: userId, deletedAt: null }, data: { pushEnabled } });
+      if (!changed.count) throw new HttpError(401, "unauthorized");
+      return { pushEnabled };
+    },
+    async register(context: AuthContext, value: unknown) {
       if (typeof value !== "string" || value.trim().length < 16 || value.length > 4096 || value.trim() !== value) {
         throw new HttpError(400, "invalid_push_token");
       }
-      if (!uuidPattern.test(userId) || !uuidPattern.test(deviceId)) throw new HttpError(401, "unauthorized");
-      await db.pushToken.upsert({
-        where: { token: value },
-        create: { token: value, userId, deviceId, provider: "fcm" },
-        update: { userId, deviceId, provider: "fcm", updatedAt: new Date() },
+      const { user: { id: userId }, deviceId, sessionId } = context;
+      await db.$transaction(async tx => {
+        const user = await lockActiveAccount(tx, userId);
+        const now = new Date();
+        const session = await tx.userSession.findFirst({ where: {
+          id: sessionId, userId, deviceId, revokedAt: null, accessExpiresAt: { gt: now }, expiresAt: { gt: now },
+        }, select: { id: true } });
+        if (!user || !session) throw new HttpError(401, "unauthorized");
+        await tx.pushToken.upsert({
+          where: { token: value },
+          create: { token: value, userId, deviceId, provider: "fcm" },
+          update: { userId, deviceId, provider: "fcm", updatedAt: now },
+        });
       });
     },
 
@@ -114,39 +140,6 @@ export function createNotificationService(db: PrismaClient, config: FcmSettings,
       await db.pushToken.deleteMany({ where: { userId, deviceId } });
     },
 
-    async notifyNewMessage(conversationId: string, messageId: string) {
-      if (!serviceAccount || !config.projectId) return;
-      const message = await db.message.findFirst({
-        where: { id: messageId, conversationId, deletedAt: null },
-        select: { senderId: true, sender: { select: { user: { select: { displayName: true } } } } },
-      });
-      if (!message) return;
-      const recipients = await db.conversationMember.findMany({
-        where: { conversationId, leftAt: null, userId: { not: message.senderId } },
-        select: { user: { select: { pushTokens: { select: { id: true, token: true } } } } },
-      });
-      const tokens = recipients.flatMap(member => member.user.pushTokens);
-      const title = "New message";
-      const body = `${message.sender.user.displayName} sent you a message`;
-      let sent = 0;
-      for (let i = 0; i < tokens.length; i += 20) {
-        const batch = tokens.slice(i, i + 20);
-        const results = await Promise.all(batch.map(async pushToken => {
-          try {
-            const result = await send(pushToken.token, title, body, { type: "message", conversationId, messageId });
-            if (result === "invalid") {
-              await db.pushToken.deleteMany({ where: { id: pushToken.id } });
-            }
-            return result;
-          } catch {
-            log("push.delivery_failed", { reason: "transport_error" });
-            return "failed" as const;
-          }
-        }));
-        sent += results.filter(result => result === "sent").length;
-      }
-      if (sent) log("push.delivered", { count: sent });
-    },
   };
 }
 

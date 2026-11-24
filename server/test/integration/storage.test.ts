@@ -71,6 +71,19 @@ test("duplicate client message IDs are rejected within a sender and conversation
   await assert.rejects(tx.message.create({ data }), { code: "P2002" });
 }));
 
+test("message positions follow writes even when timestamps go backwards", () => fixture(async tx => {
+  const sender = await user(tx);
+  const conversation = await tx.conversation.create({ data: { kind: "group", title: "Message order" } });
+  await tx.conversationMember.create({ data: { conversationId: conversation.id, userId: sender.id, role: "owner" } });
+  const data = { conversationId: conversation.id, senderId: sender.id, content: "Fixture message" };
+  const first = await tx.message.create({ data: { ...data, clientMessageId: randomUUID(), createdAt: new Date("2026-01-02") } });
+  const second = await tx.message.create({ data: { ...data, clientMessageId: randomUUID(), createdAt: new Date("2026-01-01") } });
+  assert.equal(first.position, 1n);
+  assert.equal(second.position, 2n);
+  const later = await tx.message.findMany({ where: { conversationId: conversation.id, position: { gt: first.position } } });
+  assert.deepEqual(later.map(message => message.id), [second.id]);
+}));
+
 test("a sender must have a membership in the message's conversation", () => fixture(async tx => {
   const outsider = await user(tx);
   const conversation = await tx.conversation.create({ data: { kind: "group" } });

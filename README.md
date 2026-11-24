@@ -22,6 +22,12 @@ From a second terminal, run `bash infrastructure/scripts/check-deployment.sh htt
 
 ## Web chat app
 
+Open **Profile and settings** from your avatar to update your name and bio, change message density, or manage sign-out. Use **Select messages** in a chat to copy text or delete your own messages. The open chat loads missed messages after reconnecting.
+
+Open **Settings → Account recovery** to generate and save recovery codes. Use **Forgot password?** on the sign-in screen and enter a saved code to reset your password. Resetting revokes all sessions and remaining codes. **Settings → Delete account** requires your username and current password, removes your account data, and preserves messages written by other chat members.
+
+Open a direct chat and use the **Voice call** or **Video call** button while both users are online. Calls use microphone and camera access in the browser. Same-machine calls can run locally. For remote use, configure HTTPS and ICE infrastructure and verify calls across the intended networks. Group calls are a later milestone.
+
 The Next.js App Router client lives in `apps/web`. It includes account registration and login, conversation search, direct chats, group creation, live text messaging, and private attachment uploads. Its same-origin API routes keep access and refresh tokens in HTTP-only cookies; Socket.IO receives a short-lived access token only in memory. Copy `apps/web/.env.example` to `apps/web/.env.local`, then run `pnpm install --frozen-lockfile` and `pnpm dev:web`. The backend must be running at `http://127.0.0.1:4080`, with `http://127.0.0.1:3000` allowed in `SOCKET_ALLOWED_ORIGINS`. On a local development machine, use the Docker Compose stack described in [Deployment](docs/deployment.md) to provide the API, PostgreSQL and Redis.
 
 ## Foundation checks
@@ -73,4 +79,4 @@ bash infrastructure/scripts/oracle-inventory.sh
 
 The inventory has been reviewed. The Compose manifest, resource budgets and proxy integration are documented in [Deployment](docs/deployment.md). Local verification results are in [Verification](docs/verification.md).
 
-The isolated [Docker Compose deployment](docs/deployment.md#compose-deployment) uses a private PostgreSQL/Redis pair and exposes only the API on host loopback for the existing Caddy proxy. It has not been deployed to the VPS.
+The [private web beta setup](docs/deployment.md#private-web-beta) uses a private PostgreSQL and Redis pair, loopback ports for the web and API containers, and a password protected Caddy site. It includes database and media backup and restore procedures.

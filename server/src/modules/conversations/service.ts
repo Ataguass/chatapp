@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { Prisma, PrismaClient } from "@prisma/client";
-import type { ConversationSummary, PublicUser } from "@messaging/contracts";
+import type { ConversationPage, ConversationSummary, PublicUser } from "@messaging/contracts";
 import { HttpError } from "../auth/service.ts";
 
 const defaultMaxGroupMembers = 100;
@@ -128,17 +128,45 @@ export function createConversationService(db: PrismaClient, maxGroupMembers = de
       const memberships = await db.conversationMember.findMany({
         where: { userId, leftAt: null },
         include: { conversation: { include: conversationInclude } },
-        orderBy: { joinedAt: "desc" },
+        orderBy: [{ joinedAt: "desc" }, { conversationId: "desc" }],
         take: 50,
       });
       return memberships.map(({ conversation }) => conversationView(conversation));
     },
 
+    async page(userId: string, rawCursor: string | undefined, rawLimit: string | undefined): Promise<ConversationPage> {
+      const limit = Number(rawLimit ?? 50);
+      if ((rawLimit !== undefined && !/^\d{1,3}$/.test(rawLimit)) || limit < 1 || limit > 100) {
+        throw new HttpError(400, "invalid_limit");
+      }
+      const where: Prisma.ConversationMemberWhereInput = { userId, leftAt: null };
+      if (rawCursor !== undefined) {
+        const match = /^(\d{13})_([\da-f-]{36})$/i.exec(rawCursor);
+        if (!match || !uuidPattern.test(match[2])) throw new HttpError(400, "invalid_cursor");
+        const joinedAt = new Date(Number(match[1]));
+        where.OR = [{ joinedAt: { lt: joinedAt } }, { joinedAt, conversationId: { lt: match[2] } }];
+      }
+      const memberships = await db.conversationMember.findMany({
+        where,
+        include: { conversation: { include: conversationInclude } },
+        orderBy: [{ joinedAt: "desc" }, { conversationId: "desc" }],
+        take: limit + 1,
+      });
+      const page = memberships.slice(0, limit);
+      const last = page.at(-1);
+      return {
+        conversations: page.map(({ conversation }) => conversationView(conversation)),
+        nextCursor: memberships.length > limit && last
+          ? `${String(last.joinedAt.getTime()).padStart(13, "0")}_${last.conversationId}`
+          : null,
+      };
+    },
+
     async openDirect(userId: string, target: DirectTarget) {
       const other = target.userId
-        ? await db.user.findUnique({ where: { id: target.userId }, select: { id: true } })
+        ? await db.user.findUnique({ where: { id: target.userId, deletedAt: null }, select: { id: true } })
         : target.username
-          ? await db.user.findUnique({ where: { username: target.username.trim().toLowerCase() }, select: { id: true } })
+          ? await db.user.findUnique({ where: { username: target.username.trim().toLowerCase(), deletedAt: null }, select: { id: true } })
           : null;
       if (!other) throw new HttpError(404, "user_not_found");
       if (other.id === userId) throw new HttpError(400, "cannot_message_self");
@@ -181,7 +209,7 @@ export function createConversationService(db: PrismaClient, maxGroupMembers = de
       const initialIds = memberIds(rawMemberIds, maxGroupMembers - 1);
       if (initialIds.includes(ownerId)) throw new HttpError(400, "group_owner_is_implicit");
       const allIds = [ownerId, ...initialIds];
-      const found = await db.user.findMany({ where: { id: { in: allIds } }, select: { id: true } });
+      const found = await db.user.findMany({ where: { id: { in: allIds }, deletedAt: null }, select: { id: true } });
       if (found.length !== allIds.length) throw new HttpError(404, "group_member_not_found");
       const conversation = await serializable(db, tx => tx.conversation.create({
         data: {
@@ -230,7 +258,7 @@ export function createConversationService(db: PrismaClient, maxGroupMembers = de
       const ids = memberIds(rawUserIds, maxGroupMembers);
       await requireGroupAdmin(db, conversationId, actorId);
       if (ids.includes(actorId)) throw new HttpError(400, "cannot_add_self");
-      const users = await db.user.findMany({ where: { id: { in: ids } }, select: { id: true } });
+      const users = await db.user.findMany({ where: { id: { in: ids }, deletedAt: null }, select: { id: true } });
       if (users.length !== ids.length) throw new HttpError(404, "group_member_not_found");
       return serializable(db, async tx => {
         const actor = await tx.conversationMember.findFirst({
@@ -379,6 +407,24 @@ export function createConversationService(db: PrismaClient, maxGroupMembers = de
       });
     },
 
+    async previewInvite(userId: string, token: string) {
+      if (!/^[a-z\d_-]{43}$/i.test(token)) throw new HttpError(404, "invite_unavailable");
+      const invite = await db.groupInvitation.findUnique({
+        where: { tokenHash: inviteDigest(token) },
+        select: { expiresAt: true, revokedAt: true, useCount: true, maxUses: true, conversation: {
+          select: { kind: true, title: true, members: { where: { userId, leftAt: null }, select: { userId: true } },
+            _count: { select: { members: { where: { leftAt: null } } } } },
+        } },
+      });
+      if (!invite || invite.conversation.kind !== "group") throw new HttpError(404, "invite_unavailable");
+      const joined = invite.conversation.members.length > 0;
+      if (invite.revokedAt || invite.expiresAt <= new Date() || (!joined && invite.useCount >= invite.maxUses)) {
+        throw new HttpError(410, "invite_unavailable");
+      }
+      return { title: invite.conversation.title, expiresAt: invite.expiresAt.toISOString(), joined,
+        canJoin: joined || invite.conversation._count.members < maxGroupMembers };
+    },
+
     async redeemInvite(userId: string, token: string) {
       if (typeof token !== "string" || token.length < 32 || token.length > 128) {
         throw new HttpError(404, "invite_unavailable");
@@ -390,13 +436,14 @@ export function createConversationService(db: PrismaClient, maxGroupMembers = de
         });
         if (!invite || invite.conversation.kind !== "group") throw new HttpError(404, "invite_unavailable");
         const now = new Date();
-        if (invite.revokedAt || invite.expiresAt <= now || invite.useCount >= invite.maxUses) {
+        if (invite.revokedAt || invite.expiresAt <= now) {
           throw new HttpError(410, "invite_unavailable");
         }
         const active = await tx.conversationMember.findUnique({
           where: { conversationId_userId: { conversationId: invite.conversationId, userId } },
         });
         if (active?.leftAt === null) return { joined: false, conversationId: invite.conversationId };
+        if (invite.useCount >= invite.maxUses) throw new HttpError(410, "invite_unavailable");
         const activeCount = await tx.conversationMember.count({
           where: { conversationId: invite.conversationId, leftAt: null },
         });

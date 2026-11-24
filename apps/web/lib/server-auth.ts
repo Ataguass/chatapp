@@ -11,6 +11,7 @@ type SessionPayload = {
   refreshToken: string;
   refreshExpiresAt: string;
 };
+const rotations = new Map<string, Promise<SessionPayload | null>>();
 
 function cookieOptions(expires: Date) {
   return {
@@ -34,20 +35,27 @@ export function clearSession(jar: CookieJar) {
   jar.delete(expiryCookie);
 }
 
-async function rotate(jar: CookieJar) {
-  const refreshToken = jar.get(refreshCookie)?.value;
-  if (!refreshToken) return null;
+async function requestRotation(refreshToken: string) {
   const response = await fetch(`${apiUrl()}/v1/auth/refresh`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ refreshToken }),
     cache: "no-store",
+    signal: AbortSignal.timeout(5000),
   });
-  if (!response.ok) {
-    clearSession(jar);
-    return null;
+  return response.ok ? await response.json() as SessionPayload : null;
+}
+
+async function rotate(jar: CookieJar) {
+  const refreshToken = jar.get(refreshCookie)?.value;
+  if (!refreshToken || !/^[a-zA-Z0-9_-]{43}$/.test(refreshToken)) return null;
+  let pending = rotations.get(refreshToken);
+  if (!pending) {
+    pending = requestRotation(refreshToken).finally(() => rotations.delete(refreshToken));
+    rotations.set(refreshToken, pending);
   }
-  const session = await response.json() as SessionPayload;
+  const session = await pending;
+  if (!session) return null;
   saveSession(jar, session);
   return session.accessToken;
 }

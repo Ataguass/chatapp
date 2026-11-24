@@ -2,6 +2,10 @@ packages:
   - 'apps/*'
   - 'packages/*'
   - 'server'
+overrides:
+  # Patched transitive dependencies while this project is on Prisma 6.
+  '@prisma/config>deepmerge-ts': 8.0.0
+  '@prisma/config>effect': 3.22.1
 onlyBuiltDependencies:
   - '@prisma/client'
   - '@prisma/engines'

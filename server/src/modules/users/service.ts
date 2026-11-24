@@ -69,9 +69,18 @@ function validateProfile(patch: ProfilePatch) {
 
 export function createUserService(db: PrismaClient) {
   return {
+    async listBlocks(userId: string, after?: string) {
+      const rows = await db.userBlock.findMany({
+        where: { blockerId: userId, blockedId: after ? { gt: after } : undefined, blocked: { deletedAt: null } },
+        orderBy: { blockedId: "asc" }, include: { blocked: { select: publicUserSelect } }, take: 101,
+      });
+      return { users: rows.slice(0, 100).map(row => publicUser(row.blocked)),
+        nextCursor: rows.length > 100 ? rows[99].blockedId : null };
+    },
+
     async getByUsername(viewerId: string, rawUsername: string) {
       const username = normalizedUsername(rawUsername);
-      const user = await db.user.findUnique({ where: { username }, select: publicUserSelect });
+      const user = await db.user.findUnique({ where: { username, deletedAt: null }, select: publicUserSelect });
       if (!user) throw new HttpError(404, "user_not_found");
       const blocked = await db.userBlock.findFirst({
         where: { OR: [
@@ -91,6 +100,7 @@ export function createUserService(db: PrismaClient) {
         where: {
           username: { startsWith: query },
           id: { not: viewerId },
+          deletedAt: null,
           blocks: { none: { blockedId: viewerId } },
           blockedBy: { none: { blockerId: viewerId } },
         },
@@ -103,19 +113,23 @@ export function createUserService(db: PrismaClient) {
 
     async updateProfile(userId: string, patch: ProfilePatch) {
       const data = validateProfile(patch);
-      const user = await db.user.update({ where: { id: userId }, data, select: publicUserSelect });
+      const user = await db.user.update({ where: { id: userId, deletedAt: null }, data, select: publicUserSelect });
       return publicUser(user);
     },
 
     async block(blockerId: string, blockedId: string) {
       if (blockerId === blockedId) throw new HttpError(400, "cannot_block_self");
-      const target = await db.user.findUnique({ where: { id: blockedId }, select: { id: true } });
+      const target = await db.user.findUnique({ where: { id: blockedId, deletedAt: null }, select: { id: true } });
       if (!target) throw new HttpError(404, "user_not_found");
       try {
         await db.userBlock.create({ data: { blockerId, blockedId } });
       } catch (error) {
         if (!(error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002")) throw error;
       }
+      const [userOneId, userTwoId] = [blockerId, target.id].sort();
+      return db.directConversation.findUnique({
+        where: { userOneId_userTwoId: { userOneId, userTwoId } }, select: { conversationId: true },
+      });
     },
 
     async unblock(blockerId: string, blockedId: string) {

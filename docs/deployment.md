@@ -1,4 +1,55 @@
-# Deploying the foundation
+# Deploying Chatapp
+
+## Private web beta
+
+Use a dedicated release directory and the Compose project `chatapp-beta`. The web container listens on host loopback at `127.0.0.1:4300`, the API at `127.0.0.1:4080`, and the database and Redis stay on the Compose network. The public Caddy site serves the web app and forwards `/socket.io/` to the API on the same origin. Its browser password protects both paths, in addition to individual Chatapp accounts.
+
+In the release directory, create an ignored `.env.beta` with `CHAT_WEB_ORIGIN` set to the exact HTTPS URL. On a fresh release with its own empty `secrets/` directory, run:
+
+```bash
+bash infrastructure/scripts/create-compose-secrets.sh
+compose=(docker compose --env-file .env.beta -p chatapp-beta -f docker-compose.yml -f docker-compose.beta.yml)
+"${compose[@]}" config --quiet
+"${compose[@]}" build api web
+"${compose[@]}" up -d --wait postgres redis
+"${compose[@]}" run --rm --no-deps api pnpm db:deploy
+"${compose[@]}" up -d --no-build --wait api web
+curl -fsS http://127.0.0.1:4080/health/ready
+curl -fsS http://127.0.0.1:4300/ -o /dev/null
+```
+
+Render the beta site block with `bash infrastructure/scripts/render-chatapp-beta-caddy.sh HOST BETA_USERNAME HASH_FILE`. `HOST` is the hostname or public IPv4 address without `https://`. `HASH_FILE` contains only a bcrypt hash from `caddy hash-password`. A public IPv4 address uses Let's Encrypt's short-lived IP certificates. A DNS hostname uses Caddy's normal certificate automation. Keep the beta password private. The production runtime has no extra public HTTP API origin to configure.
+
+Before activating the beta, back up the existing Caddy configuration and validate the merged full configuration with the running Caddy version. The existing server bind mounts its Caddyfile as a single file. Preserve its inode when applying an approved edit so reloads and container restarts read the new contents. After reloading, verify TLS with normal certificate validation, check unauthenticated web and socket requests return `401`, and sign in with a beta account to check live delivery. Confirm that n8n and both Hermes units still work. If activation fails, restore the Caddyfile backup in place and reload it. [Caddy HTTPS documentation](https://caddyserver.com/docs/automatic-https) · [Let's Encrypt IP certificates](https://letsencrypt.org/2026/01/15/6day-and-ip-general-availability)
+
+### Optional backend services
+
+The private beta can run on PostgreSQL and Redis with the optional services disabled. Enable Firebase message notifications by mounting the service-account JSON read-only in the API and setting `FCM_PROJECT_ID` and `FCM_SERVICE_ACCOUNT_FILE` to the project and the path inside the container. The worker runs with the API and PostgreSQL retains pending notifications during restarts.
+
+For a configured Coturn deployment, mount the shared secret as a separate read-only file and set `CALL_TURN_SECRET_FILE` to its in-container path. Set `CALL_ICE_URLS` to the reachable TURN and optional STUN URLs. The API issues short-lived credentials, and the clients obtain them from `/v1/calls/ice`. Validate a relay-only call between separate networks before relying on it. The existing private beta proxy continues to handle HTTPS and Socket.IO.
+
+Set `SYSTEM_ADMIN_USER_IDS` only for accounts entrusted with reports and upload rules. An empty value disables all system administration access. Configure it on the API container.
+
+### Back up and rehearse recovery
+
+Stop the beta web and API before a backup so the database and private media agree. Leave PostgreSQL up. Restart the beta web and API after the script completes, even if it reports an error.
+
+```bash
+"${compose[@]}" stop web api
+bash infrastructure/scripts/backup-chatapp.sh chatapp-beta "$HOME/chatapp-backups"
+"${compose[@]}" up -d --no-build api web
+```
+
+The backup contains a PostgreSQL archive, a media archive, and checksums. It will contain sensitive messages and password hashes once people use the app. Keep backup directories private and retain a securely stored copy off the VPS. Retain volume credentials separately. The restore script accepts only a fresh `chatapp-restore-*` project and verifies checksums and empty destinations before restoring:
+
+```bash
+restore_project=chatapp-restore-drill
+docker image tag chatapp-beta-api "$restore_project-api"
+docker compose -p "$restore_project" -f docker-compose.yml up -d --wait postgres
+bash infrastructure/scripts/restore-chatapp.sh "$restore_project" /absolute/path/to/backup-directory
+```
+
+Use a new restore project on each drill. Check the restored schema, sample messages and attachment bytes before treating the archive as recoverable. The restoration procedure does not overwrite the active database or media volume.
 
 ## Compose deployment
 
@@ -22,6 +73,8 @@ The secret setup script creates random 256-bit passwords and connection URL file
 For local development, copy the secret script output into the same checkout and use the same Compose commands. The API health check stays unhealthy until both baseline migrations have been applied.
 
 ## Existing Caddy integration
+
+Set `CHAT_WEB_ORIGIN` to the exact public HTTPS origin on the production web server. Browser session and proxy mutations require the same origin. Set `API_TRUSTED_PROXY_IPS` only to exact immediate proxy addresses that overwrite untrusted forwarding headers. Otherwise API source limits use the immediate peer IP, so requests from a shared web proxy share a source budget.
 
 The current Caddy container uses host networking and reads `/home/ubuntu/n8n/Caddyfile`. Preserve its existing site blocks. Choose the API hostname after DNS is pointed at the VPS, append the site block from `infrastructure/caddy/messaging-api.caddy` with that literal hostname, then validate before reloading:
 
@@ -65,4 +118,4 @@ For an existing Caddy deployment, review the merged configuration and validate i
 | Compare pre/post routing and health for n8n and Hermes | Same routes and healthy services |
 | Review published listeners and volumes | PostgreSQL, Redis and future private media are reachable only by intended services |
 
-The Compose configuration is prepared but has not been deployed. Before rollout, recheck disk space, finalize the API hostname and DNS, and follow the acceptance checks above. No cloud credentials are included in this repository.
+Before upgrading the private beta, recheck disk space and run the backup drill. Apply checked-in migrations to the Chatapp database only. The standalone public API exposure described above is a separate deployment option. No cloud credentials are included in this repository.

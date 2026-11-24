@@ -6,6 +6,7 @@ coverage/
 .env.*
 !.env.example
 secrets/
+backups/
 **/*firebase-service-account*.json
 **/*firebase-adminsdk*.json
 server/data/

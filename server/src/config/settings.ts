@@ -45,6 +45,8 @@ function integer(env: Environment, key: string, fallback: number, min: number, m
 export function settings(env: Environment) {
   const host = env.API_HOST ?? "127.0.0.1";
   if (!isIP(host) && host !== "localhost") throw new Error("Invalid API_HOST");
+  const trustedProxyIps = (env.API_TRUSTED_PROXY_IPS ?? "").split(",").map(value => value.trim()).filter(Boolean);
+  if (trustedProxyIps.some(ip => !isIP(ip))) throw new Error("Invalid API_TRUSTED_PROXY_IPS");
   const socketAllowedOrigins = (env.SOCKET_ALLOWED_ORIGINS ?? "").split(",").map(value => value.trim()).filter(Boolean);
   for (const origin of socketAllowedOrigins) {
     try {
@@ -81,5 +83,6 @@ export function settings(env: Environment) {
     databaseUrl: readConnection(env, "DATABASE_URL"),
     redisUrl: readConnection(env, "REDIS_URL"),
     socketAllowedOrigins,
+    trustedProxyIps,
   };
 }

@@ -1,13 +1,14 @@
 import { Router } from "express";
 import type { Response } from "express";
-import type { GroupConversationUpdatedEvent, GroupMemberEvent, GroupMemberRemovedEvent } from "@messaging/contracts";
+import type { ConversationSummary, GroupConversationUpdatedEvent, GroupMemberEvent, GroupMemberRemovedEvent } from "@messaging/contracts";
 import { HttpError } from "../auth/service.ts";
 import { requireAuth } from "../auth/router.ts";
 import type { AuthService } from "../auth/router.ts";
 import type { AuthContext } from "../auth/service.ts";
 import type { ConversationService, DirectTarget } from "./service.ts";
 
-type GroupPublishers = {
+type ConversationPublishers = {
+  created?: (conversation: ConversationSummary) => void;
   memberAdded?: (event: GroupMemberEvent) => void;
   memberRemoved?: (event: GroupMemberRemovedEvent) => void;
   roleChanged?: (event: GroupMemberEvent) => void;
@@ -50,7 +51,7 @@ function requestUserIds(value: unknown, allowEmpty = false) {
 export function createConversationsRouter(
   auth: AuthService,
   conversations: ConversationService,
-  publishGroup?: GroupPublishers,
+  publish?: ConversationPublishers,
 ) {
   const router = Router();
   const authenticated = requireAuth(auth);
@@ -59,8 +60,16 @@ export function createConversationsRouter(
     res.json(await conversations.list(context(res).user.id));
   });
 
+  router.get("/page", authenticated, async (req, res) => {
+    const { cursor, limit } = req.query;
+    if (cursor !== undefined && typeof cursor !== "string") throw new HttpError(400, "invalid_cursor");
+    if (limit !== undefined && typeof limit !== "string") throw new HttpError(400, "invalid_limit");
+    res.json(await conversations.page(context(res).user.id, cursor, limit));
+  });
+
   router.post("/direct", authenticated, async (req, res) => {
     const result = await conversations.openDirect(context(res).user.id, requestTarget(req.body));
+    if (result.created) publish?.created?.(result.conversation);
     res.status(result.created ? 201 : 200).json(result.conversation);
   });
 
@@ -69,6 +78,7 @@ export function createConversationsRouter(
     exactFields(body, ["title", "userIds"]);
     if (typeof body.title !== "string") throw new HttpError(400, "invalid_group_title");
     const group = await conversations.createGroup(context(res).user.id, body.title, requestUserIds(body.userIds));
+    publish?.created?.(group);
     res.status(201).json(group);
   });
 
@@ -77,10 +87,17 @@ export function createConversationsRouter(
     exactFields(body, ["token"]);
     if (typeof body.token !== "string") throw new HttpError(400, "invalid_request");
     const result = await conversations.redeemInvite(context(res).user.id, body.token);
-    if (result.joined) publishGroup?.memberAdded?.({
+    if (result.joined) publish?.memberAdded?.({
       conversationId: result.conversationId, userId: context(res).user.id, role: "member",
     });
     res.json({ joined: result.joined, conversation: await conversations.get(result.conversationId, context(res).user.id) });
+  });
+
+  router.post("/invites/preview", authenticated, async (req, res) => {
+    const body = bodyObject(req.body);
+    exactFields(body, ["token"]);
+    if (typeof body.token !== "string") throw new HttpError(400, "invalid_request");
+    res.json(await conversations.previewInvite(context(res).user.id, body.token));
   });
 
   router.get("/:conversationId", authenticated, async (req, res) => {
@@ -92,7 +109,7 @@ export function createConversationsRouter(
     exactFields(body, ["title"]);
     if (typeof body.title !== "string") throw new HttpError(400, "invalid_group_title");
     const conversation = await conversations.updateGroupTitle(req.params.conversationId, context(res).user.id, body.title);
-    publishGroup?.updated?.({ conversation });
+    publish?.updated?.({ conversation });
     res.json(conversation);
   });
 
@@ -106,14 +123,14 @@ export function createConversationsRouter(
     const result = await conversations.addMembers(req.params.conversationId, context(res).user.id,
       requestUserIds(body.userIds));
     for (const userId of result.addedUserIds) {
-      publishGroup?.memberAdded?.({ conversationId: req.params.conversationId, userId, role: "member" });
+      publish?.memberAdded?.({ conversationId: req.params.conversationId, userId, role: "member" });
     }
     res.json(result);
   });
 
   router.delete("/:conversationId/members/:userId", authenticated, async (req, res) => {
     const result = await conversations.removeMember(req.params.conversationId, context(res).user.id, req.params.userId);
-    publishGroup?.memberRemoved?.({ conversationId: result.conversationId, userId: result.userId });
+    publish?.memberRemoved?.({ conversationId: result.conversationId, userId: result.userId });
     res.json({ removed: true });
   });
 
@@ -123,7 +140,7 @@ export function createConversationsRouter(
     if (body.role !== "admin" && body.role !== "member") throw new HttpError(400, "invalid_group_role");
     const result = await conversations.setMemberRole(req.params.conversationId, context(res).user.id,
       req.params.userId, body.role);
-    publishGroup?.roleChanged?.(result);
+    publish?.roleChanged?.(result);
     res.json(result);
   });
 
@@ -132,16 +149,16 @@ export function createConversationsRouter(
     exactFields(body, ["userId"]);
     if (typeof body.userId !== "string") throw new HttpError(400, "invalid_request");
     const result = await conversations.transferOwnership(req.params.conversationId, context(res).user.id, body.userId);
-    publishGroup?.roleChanged?.({ conversationId: req.params.conversationId,
+    publish?.roleChanged?.({ conversationId: req.params.conversationId,
       userId: result.previousOwnerId, role: "admin" });
-    publishGroup?.roleChanged?.({ conversationId: req.params.conversationId,
+    publish?.roleChanged?.({ conversationId: req.params.conversationId,
       userId: result.userId, role: "owner" });
     res.json({ conversationId: result.conversationId, ownerId: result.userId });
   });
 
   router.post("/:conversationId/leave", authenticated, async (req, res) => {
     const result = await conversations.leaveGroup(req.params.conversationId, context(res).user.id);
-    publishGroup?.memberRemoved?.({ conversationId: result.conversationId, userId: result.userId });
+    publish?.memberRemoved?.({ conversationId: result.conversationId, userId: result.userId });
     res.json({ left: true });
   });
 

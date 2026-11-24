@@ -58,6 +58,7 @@ services:
       NODE_ENV: production
       API_HOST: 0.0.0.0
       API_PORT: 4080
+      API_TRUSTED_PROXY_IPS: ${API_TRUSTED_PROXY_IPS:-}
       HEALTH_TIMEOUT_MS: 1500
       MAX_GROUP_MEMBERS: ${MAX_GROUP_MEMBERS:-100}
       MEDIA_STORAGE_PATH: /var/lib/messaging/media
@@ -67,6 +68,9 @@ services:
       MEDIA_DOCUMENT_MAX_BYTES: ${MEDIA_DOCUMENT_MAX_BYTES:-26214400}
       FCM_PROJECT_ID: ${FCM_PROJECT_ID:-}
       FCM_SERVICE_ACCOUNT_FILE: ${FCM_SERVICE_ACCOUNT_FILE:-}
+      CALL_ICE_URLS: ${CALL_ICE_URLS:-}
+      CALL_TURN_SECRET_FILE: ${CALL_TURN_SECRET_FILE:-}
+      SYSTEM_ADMIN_USER_IDS: ${SYSTEM_ADMIN_USER_IDS:-}
       SOCKET_ALLOWED_ORIGINS: ${SOCKET_ALLOWED_ORIGINS:-http://127.0.0.1:3000}
       DATABASE_URL_FILE: /run/secrets/database_url
       REDIS_URL_FILE: /run/secrets/redis_url
@@ -81,7 +85,7 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - "127.0.0.1:4080:4080"
+      - "127.0.0.1:${CHAT_API_HOST_PORT:-4080}:4080"
     healthcheck:
       test:
         - CMD

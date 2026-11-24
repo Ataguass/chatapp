@@ -3,6 +3,14 @@ export type HealthResponse = { status: "live" | "ready" | "unavailable" };
 
 export type DevicePlatform = "android" | "ios" | "web" | "desktop";
 
+export type AccountDevice = {
+  id: string;
+  platform: DevicePlatform;
+  deviceName: string;
+  lastSeenAt: string;
+  current: boolean;
+};
+
 export type PublicUser = {
   id: string;
   username: string;
@@ -41,9 +49,11 @@ export type GroupConversationUpdatedEvent = { conversation: ConversationSummary 
 export type PublicMessage = {
   id: string;
   conversationId: string;
+  position: string;
   senderId: string;
   clientMessageId: string;
   content: string;
+  forwarded?: boolean;
   replyToMessageId: string | null;
   replyTo: { id: string; senderId: string; content: string; deletedAt: string | null } | null;
   reactions: MessageReactionSummary[];
@@ -86,6 +96,62 @@ export type MessagePage = {
   messages: PublicMessage[];
   nextCursor: string | null;
 };
+
+export type ConversationPage = { conversations: ConversationSummary[]; nextCursor: string | null };
+
+export type MessageSyncPage = {
+  cursor: string;
+  hasMore: boolean;
+  messages: PublicMessage[];
+  removedMessageIds: string[];
+};
+
+export type StoryVisibility = "everyone" | "connections" | "selected" | "excluded";
+export type ConversationPresence = { userId: string; online: boolean; lastSeenAt: string | null };
+export type DeliveryCursor = {
+  userId: string;
+  lastDeliveredMessageId: string | null;
+  lastDeliveredPosition: string | null;
+  deliveredAt: string | null;
+};
+export type DeliveryCursorEvent = DeliveryCursor & { conversationId: string };
+export type StoryPrivacy = { visibility: StoryVisibility; userIds: string[] };
+export type PublicStory = {
+  id: string;
+  author: Pick<PublicUser, "id" | "username" | "displayName" | "avatarUrl">;
+  type: "text" | "image" | "video";
+  text: string;
+  createdAt: string;
+  expiresAt: string;
+  viewed: boolean;
+  media: { contentType: string; sizeBytes: number; downloadPath: string } | null;
+};
+
+export type CallKind = "voice" | "video";
+export type DirectCallEndReason = "ended" | "declined" | "no_answer" | "disconnected" | "offline" | "interrupted" | "unavailable";
+
+export type DirectCallRecord = {
+  id: string;
+  conversationId: string;
+  callerId: string;
+  recipientId: string;
+  kind: CallKind;
+  startedAt: string;
+  acceptedAt: string | null;
+  endedAt: string | null;
+  endReason: DirectCallEndReason | null;
+};
+
+export type CallIceConfiguration = {
+  iceServers: { urls: string[]; username?: string; credential?: string }[];
+  expiresAt: string | null;
+};
+
+export type CallInvitation = { callId: string; conversationId: string; callerId: string; kind: CallKind };
+
+export type CallSignal =
+  | { description: { type: "offer" | "answer"; sdp: string } }
+  | { candidate: { candidate: string; sdpMid?: string | null; sdpMLineIndex?: number | null; usernameFragment?: string | null } };
 
 export type MessageSendEvent = {
   conversationId: string;

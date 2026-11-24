@@ -1,7 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import { Prisma, PrismaClient } from "@prisma/client";
 import type { DevicePlatform, PublicUser, AuthSessionResponse } from "@messaging/contracts";
-import { hashPassword, verifyPassword } from "./passwords.ts";
+import { hashPassword, needsPasswordUpgrade, verifyPassword } from "./passwords.ts";
+import { lockActiveAccount } from "./account-lock.ts";
 
 const ACCESS_LIFETIME_MS = 15 * 60 * 1000;
 const REFRESH_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
@@ -9,9 +10,14 @@ const usernamePattern = /^[a-z0-9_]{3,32}$/;
 const platforms = new Set<DevicePlatform>(["android", "ios", "web", "desktop"]);
 
 export class HttpError extends Error {
-  constructor(readonly status: number, readonly code: string) {
+  readonly status: number;
+  readonly code: string;
+
+  constructor(status: number, code: string) {
     super(code);
     this.name = "HttpError";
+    this.status = status;
+    this.code = code;
   }
 }
 
@@ -57,7 +63,7 @@ function cleanUsername(value: string) {
   return username;
 }
 
-function validatePassword(value: string) {
+export function validatePassword(value: string) {
   if ([...value].length < 12 || Buffer.byteLength(value, "utf8") > 128) {
     throw new HttpError(400, "invalid_password");
   }
@@ -138,7 +144,7 @@ export function createAuthService(db: PrismaClient) {
       const username = cleanUsername(input.username);
       validatePassword(input.password);
       validateDevice(input);
-      const user = await db.user.findUnique({ where: { username } });
+      const user = await db.user.findUnique({ where: { username, deletedAt: null } });
       if (!user) {
         await hashPassword(input.password);
         throw new HttpError(401, "invalid_credentials");
@@ -146,7 +152,16 @@ export function createAuthService(db: PrismaClient) {
       if (!(await verifyPassword(input.password, user.passwordHash))) {
         throw new HttpError(401, "invalid_credentials");
       }
-      return db.$transaction(tx => createSession(tx, user, input));
+      const upgradedHash = needsPasswordUpgrade(user.passwordHash) ? await hashPassword(input.password) : null;
+      return db.$transaction(async tx => {
+        const current = await lockActiveAccount(tx, user.id);
+        if (!current || current.passwordHash !== user.passwordHash) throw new HttpError(401, "invalid_credentials");
+        if (upgradedHash) {
+          await tx.user.updateMany({ where: { id: user.id, passwordHash: user.passwordHash },
+            data: { passwordHash: upgradedHash } });
+        }
+        return createSession(tx, user, input);
+      });
     },
 
     async refresh(refreshToken: string) {
@@ -159,23 +174,30 @@ export function createAuthService(db: PrismaClient) {
         where: { refreshTokenHash: hash },
         include: { device: { include: { user: true } } },
       });
-      if (!session || session.revokedAt || session.expiresAt <= now) {
+      if (!session || session.revokedAt || session.expiresAt <= now || session.device.user.deletedAt) {
         throw new HttpError(401, "invalid_refresh_token");
       }
       const accessToken = token();
       const nextRefreshToken = token();
       const accessExpiresAt = new Date(now.getTime() + ACCESS_LIFETIME_MS);
       const refreshExpiresAt = new Date(now.getTime() + REFRESH_LIFETIME_MS);
-      const rotated = await db.userSession.updateMany({
-        where: { id: session.id, refreshTokenHash: hash, revokedAt: null, expiresAt: { gt: now } },
-        data: {
-          accessTokenHash: digest(accessToken),
-          accessExpiresAt,
-          refreshTokenHash: digest(nextRefreshToken),
-          expiresAt: refreshExpiresAt,
-        },
+      await db.$transaction(async tx => {
+        if (!await lockActiveAccount(tx, session.userId)) throw new HttpError(401, "invalid_refresh_token");
+        const rotated = await tx.userSession.updateMany({
+          where: { id: session.id, refreshTokenHash: hash, revokedAt: null, expiresAt: { gt: now } },
+          data: {
+            accessTokenHash: digest(accessToken),
+            accessExpiresAt,
+            refreshTokenHash: digest(nextRefreshToken),
+            expiresAt: refreshExpiresAt,
+          },
+        });
+        if (rotated.count !== 1) throw new HttpError(401, "invalid_refresh_token");
+        await tx.userDevice.updateMany({
+          where: { id: session.deviceId, userId: session.userId, lastSeenAt: { lt: now } },
+          data: { lastSeenAt: now },
+        });
       });
-      if (rotated.count !== 1) throw new HttpError(401, "invalid_refresh_token");
       return sessionResponse(session.device.user, accessToken, nextRefreshToken,
         accessExpiresAt, refreshExpiresAt);
     },
@@ -186,7 +208,7 @@ export function createAuthService(db: PrismaClient) {
         include: { device: { include: { user: true } } },
       });
       const now = new Date();
-      if (!session || session.revokedAt || session.accessExpiresAt <= now || session.expiresAt <= now) {
+      if (!session || session.revokedAt || session.accessExpiresAt <= now || session.expiresAt <= now || session.device.user.deletedAt) {
         throw new HttpError(401, "unauthorized");
       }
       return { sessionId: session.id, deviceId: session.deviceId, user: publicUser(session.device.user) };
@@ -194,6 +216,7 @@ export function createAuthService(db: PrismaClient) {
 
     async logout(context: AuthContext) {
       await db.$transaction(async tx => {
+        if (!await lockActiveAccount(tx, context.user.id)) return;
         await tx.userSession.updateMany({
           where: { id: context.sessionId, userId: context.user.id, revokedAt: null },
           data: { revokedAt: new Date() },
@@ -204,6 +227,7 @@ export function createAuthService(db: PrismaClient) {
 
     async logoutAll(userId: string) {
       await db.$transaction(async tx => {
+        if (!await lockActiveAccount(tx, userId)) return;
         await tx.userSession.updateMany({
           where: { userId, revokedAt: null },
           data: { revokedAt: new Date() },

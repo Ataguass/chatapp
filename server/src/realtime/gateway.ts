@@ -5,16 +5,17 @@ import type { AuthService } from "../modules/auth/router.ts";
 import { HttpError } from "../modules/auth/service.ts";
 import type { MessageService } from "../modules/messages/service.ts";
 import type { Logger } from "../infrastructure/log.ts";
-import type { NotificationService } from "../modules/notifications/service.ts";
+import type { PresenceService } from "../modules/users/presence.ts";
+import type { CallHistory } from "../modules/calls/history.ts";
+import { createCallSignaling } from "./calls.ts";
 
-type SocketServices = { auth: AuthService; messages: MessageService; notifications?: NotificationService };
+type SocketServices = { auth: AuthService; messages: MessageService; presence?: PresenceService; callHistory?: CallHistory };
 type Ack<T = unknown> = (result: { ok: true; data: T } | { ok: false; error: string }) => void;
 type ClientSocket = Socket & {
-  data: { userId?: string; accessToken?: string; joinedConversations?: Set<string> };
+  data: { userId?: string; sessionId?: string; deviceId?: string; accessToken?: string; joinedConversations?: Set<string> };
 };
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const maxMessageLength = 4000;
 
 function allowedOrigin(origin: string | undefined, allowed: readonly string[]) {
   return !origin || allowed.includes(origin);
@@ -54,6 +55,8 @@ export function createRealtimeGateway(
     },
   });
 
+  const calls = createCallSignaling(io, services.messages.callPeer, services.callHistory);
+
   io.use(async (socket, next) => {
     const supplied = socket.handshake.auth?.token;
     if (typeof supplied !== "string" || !supplied || supplied.length > 128) {
@@ -63,6 +66,8 @@ export function createRealtimeGateway(
     try {
       const context = await services.auth.authenticate(supplied);
       socket.data.userId = context.user.id;
+      socket.data.sessionId = context.sessionId;
+      socket.data.deviceId = context.deviceId;
       socket.data.accessToken = supplied;
       next();
     } catch {
@@ -73,19 +78,46 @@ export function createRealtimeGateway(
   io.on("connection", rawSocket => {
     const socket = rawSocket as ClientSocket;
     const userId = socket.data.userId;
-    if (!userId) {
+    const sessionId = socket.data.sessionId;
+    const deviceId = socket.data.deviceId;
+    if (!userId || !sessionId || !deviceId) {
       socket.disconnect(true);
       return;
     }
     socket.data.joinedConversations = new Set();
-    void socket.join(`user:${userId}`);
+    void socket.join([`user:${userId}`, `session:${sessionId}`, `device:${userId}:${deviceId}`]);
+    const publishPresence = async (online: boolean) => {
+      const presence = services.presence;
+      if (!presence) return;
+      try {
+        const lastSeenAt = await presence.touch(userId, deviceId);
+        const peers = await presence.directPeers(userId);
+        if (io.sockets.adapter.rooms.has(`user:${userId}`) !== online || !peers.length) return;
+        io.to(peers.map(peer => `user:${peer.id}`)).emit("presence:update", { userId, online, lastSeenAt });
+      } catch {
+        log("presence.update_failed");
+      }
+    };
+    if (io.sockets.adapter.rooms.get(`user:${userId}`)?.size === 1) void publishPresence(true);
+    calls.attach(socket, userId);
+    socket.on("session:authenticate", async (token: unknown, callback: unknown) => {
+      if (typeof token !== "string" || !token || token.length > 128) return acknowledge(callback, { ok: false, error: "unauthorized" });
+      try {
+        const context = await services.auth.authenticate(token);
+        if (context.sessionId !== sessionId) return acknowledge(callback, { ok: false, error: "unauthorized" });
+        socket.data.accessToken = token;
+        acknowledge(callback, { ok: true, data: null });
+      } catch { acknowledge(callback, { ok: false, error: "unauthorized" }); }
+    });
     const sessionCheck = setInterval(() => {
       const accessToken = socket.data.accessToken;
       if (!accessToken) {
         socket.disconnect(true);
         return;
       }
-      void services.auth.authenticate(accessToken).catch(() => socket.disconnect(true));
+      void services.auth.authenticate(accessToken).catch(() => {
+        if (socket.data.accessToken === accessToken) socket.disconnect(true);
+      });
     }, 60_000);
     sessionCheck.unref();
     log("socket.connected");
@@ -147,8 +179,6 @@ export function createRealtimeGateway(
           { clientMessageId, content, replyToMessageId: replyToMessageId as string | null | undefined });
         if (result.created) {
           socket.to(`conversation:${conversationId}`).emit("message:new", result.message satisfies PublicMessage);
-          void services.notifications?.notifyNewMessage(conversationId, result.message.id)
-            .catch(() => log("push.dispatch_failed"));
         }
         const data = { message: result.message, created: result.created };
         socket.emit("message:ack", data);
@@ -277,6 +307,7 @@ export function createRealtimeGateway(
 
     socket.on("disconnect", reason => {
       clearInterval(sessionCheck);
+      if (!io.sockets.adapter.rooms.has(`user:${userId}`)) void publishPresence(false);
       for (const conversationId of socket.data.joinedConversations ?? []) {
         socket.to(`conversation:${conversationId}`).emit("typing:stop", { conversationId, userId });
       }
@@ -284,5 +315,5 @@ export function createRealtimeGateway(
     });
   });
 
-  return io;
+  return Object.assign(io, { endCallsBetween: calls.endBetween });
 }

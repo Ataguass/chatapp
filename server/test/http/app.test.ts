@@ -51,3 +51,19 @@ test("unexpected health errors produce a generic JSON response", async t => {
   assert.equal(result.status, 500);
   assert.deepEqual(await result.json(), { error: "internal_error" });
 });
+
+test("oversized requests close the HTTP connection and the server stays available", async t => {
+  const { url } = await listening(t, async () => true);
+  const rejected = await fetch(url + "/v1/conversations", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content: "x".repeat(16 * 1024) }),
+  });
+  assert.equal(rejected.status, 413);
+  assert.equal(rejected.headers.get("connection"), "close");
+  assert.deepEqual(await rejected.json(), { error: "payload_too_large" });
+
+  const live = await fetch(url + "/health/live");
+  assert.equal(live.status, 200);
+  assert.deepEqual(await live.json(), { status: "live" });
+});

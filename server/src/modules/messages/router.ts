@@ -1,6 +1,6 @@
 import { Router } from "express";
 import type { Response } from "express";
-import type { MessageDeletedEvent, MessageReactionEvent, MessageUpdatedEvent, PublicMessage } from "@messaging/contracts";
+import type { DeliveryCursorEvent, MessageDeletedEvent, MessageReactionEvent, MessageUpdatedEvent, PublicMessage } from "@messaging/contracts";
 import { HttpError } from "../auth/service.ts";
 import { requireAuth } from "../auth/router.ts";
 import type { AuthService } from "../auth/router.ts";
@@ -8,12 +8,16 @@ import type { AuthContext } from "../auth/service.ts";
 import type { ConversationReadCursorEvent } from "@messaging/contracts";
 import type { MessageService } from "./service.ts";
 import type { AttachmentService } from "./attachments.ts";
+import type { PresenceService } from "../users/presence.ts";
+import { downloadPrivateFile } from "../../infrastructure/private-download.ts";
 
 type MessagePublishers = {
   created?: (conversationId: string, message: PublicMessage) => void;
   updated?: (conversationId: string, event: MessageUpdatedEvent) => void;
   deleted?: (conversationId: string, event: MessageDeletedEvent) => void;
   reaction?: (conversationId: string, event: MessageReactionEvent) => void;
+  delivered?: (event: DeliveryCursorEvent) => void;
+  hidden?: (event: { conversationId: string; userId: string; messageIds: string[] }) => void;
 };
 
 function context(res: Response) {
@@ -45,9 +49,18 @@ export function createMessagesRouter(
   publishReadCursor?: (event: ConversationReadCursorEvent) => void,
   publishMessage?: MessagePublishers,
   attachments?: AttachmentService,
+  presence?: PresenceService,
 ) {
   const router = Router();
   const authenticated = requireAuth(auth);
+
+  if (presence) {
+    router.get("/:conversationId/presence", authenticated, async (req, res) => {
+      const userId = context(res).user.id;
+      await messages.authorize(req.params.conversationId, userId);
+      res.json(await presence.list(req.params.conversationId, userId));
+    });
+  }
 
   if (attachments) {
     router.post("/:conversationId/attachments", authenticated, async (req, res) => {
@@ -78,16 +91,19 @@ export function createMessagesRouter(
 
     router.get("/:conversationId/attachments/:attachmentId", authenticated, async (req, res) => {
       const file = await attachments.open(req.params.conversationId, context(res).user.id, req.params.attachmentId);
-      const safeName = file.fileName.replace(/[\r\n"\\]/g, "_");
-      res.status(200).set({
-        "Content-Type": file.contentType,
-        "Content-Length": String(file.sizeBytes),
-        "Content-Disposition": `attachment; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(file.fileName)}`,
-        "Cache-Control": "private, no-store",
-        "X-Content-Type-Options": "nosniff",
-      });
-      file.stream.on("error", () => { if (!res.headersSent) res.status(404).end(); else res.destroy(); });
-      file.stream.pipe(res);
+      await downloadPrivateFile(req, res, file);
+    });
+
+    router.post("/:conversationId/messages/:messageId/forward", authenticated, async (req, res) => {
+      const input = req.body;
+      if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).length !== 2 ||
+          typeof input.conversationId !== "string" || typeof input.clientMessageId !== "string") {
+        throw new HttpError(400, "invalid_request");
+      }
+      const result = await attachments.forward(req.params.conversationId, context(res).user.id, req.params.messageId,
+        input.conversationId, input.clientMessageId);
+      if (result.created) publishMessage?.created?.(result.message.conversationId, result.message);
+      res.status(result.created ? 201 : 200).json(result.message);
     });
   }
 
@@ -104,10 +120,39 @@ export function createMessagesRouter(
     res.json(result);
   });
 
+  router.get("/:conversationId/sync", authenticated, async (req, res) => {
+    const { after, limit } = req.query;
+    if (after !== undefined && typeof after !== "string") throw new HttpError(400, "invalid_cursor");
+    if (limit !== undefined && typeof limit !== "string") throw new HttpError(400, "invalid_limit");
+    res.json(await messages.sync(req.params.conversationId, context(res).user.id, after, limit));
+  });
+
+  router.get("/:conversationId/settings", authenticated, async (req, res) => {
+    res.json(await messages.settings(req.params.conversationId, context(res).user.id));
+  });
+  router.patch("/:conversationId/settings", authenticated, async (req, res) => {
+    const body = req.body;
+    if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1 ||
+        typeof body.pushMuted !== "boolean") throw new HttpError(400, "invalid_request");
+    res.json(await messages.settings(req.params.conversationId, context(res).user.id, body.pushMuted));
+  });
+
   router.post("/:conversationId/messages", authenticated, async (req, res) => {
     const result = await messages.send(req.params.conversationId, context(res).user.id, messageInput(req.body));
     if (result.created) publishMessage?.created?.(req.params.conversationId, result.message);
     res.status(result.created ? 201 : 200).json(result.message);
+  });
+
+  router.post("/:conversationId/messages/hide", authenticated, async (req, res) => {
+    const body = req.body;
+    if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1 ||
+        !Array.isArray(body.messageIds) || body.messageIds.some((id: unknown) => typeof id !== "string")) {
+      throw new HttpError(400, "invalid_request");
+    }
+    const userId = context(res).user.id;
+    const messageIds = await messages.hide(req.params.conversationId, userId, body.messageIds);
+    publishMessage?.hidden?.({ conversationId: req.params.conversationId, userId, messageIds });
+    res.json({ messageIds });
   });
 
   router.put("/:conversationId/messages/:messageId", authenticated, async (req, res) => {
@@ -162,6 +207,22 @@ export function createMessagesRouter(
     }
     const result = await messages.markRead(req.params.conversationId, context(res).user.id, req.body.messageId);
     if (result.advanced) publishReadCursor?.(result);
+    res.json(result);
+  });
+
+  router.get("/:conversationId/delivery-cursors", authenticated, async (req, res) => {
+    res.json(await messages.deliveryCursors(req.params.conversationId, context(res).user.id));
+  });
+  router.post("/:conversationId/delivered", authenticated, async (req, res) => {
+    if (!req.body || typeof req.body !== "object" || Array.isArray(req.body) ||
+        Object.keys(req.body).length !== 1 || typeof req.body.messageId !== "string") {
+      throw new HttpError(400, "invalid_request");
+    }
+    const result = await messages.markDelivered(req.params.conversationId, context(res).user.id, req.body.messageId);
+    if (result.advanced) {
+      const { advanced: _advanced, ...event } = result;
+      publishMessage?.delivered?.(event);
+    }
     res.json(result);
   });
 

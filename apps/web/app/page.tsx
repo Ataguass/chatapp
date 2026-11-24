@@ -1,81 +1,54 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { io, type Socket } from "socket.io-client";
-import type { ConversationSummary, PublicMessage, PublicUser } from "@messaging/contracts";
+import type { ConversationPage, ConversationSummary, MessageDeletedEvent, MessagePage, MessageSyncPage, PublicMessage, PublicUser } from "@messaging/contracts";
+import { ChatDialog } from "./chat-dialog";
+import { ChatSettings, type ProfileFields } from "./chat-settings";
+import { CallHistory } from "./call-history";
+import { ConversationDetails, InvitationDialog } from "./conversation-details";
+import { StoriesDialog } from "./stories";
+import { RecoveryDialog } from "./account-security";
+import { CallPanel, useDirectCall } from "./direct-call";
+import { mergeMessages } from "../lib/message-history";
+import { api } from "../lib/client-api";
+import { Avatar, Icon } from "./ui";
 
-type MessagePage = { messages: PublicMessage[]; nextCursor: string | null };
+const noMessages: PublicMessage[] = [];
 type AuthMode = "login" | "register";
 type ModalMode = "chat" | "group" | null;
-
-async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const headers = new Headers(init.headers);
-  if (!(init.body instanceof FormData) && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-  const response = await fetch(`/api/backend/${path.replace(/^\//, "")}`, {
-    ...init,
-    headers,
-    cache: "no-store",
-  });
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({})) as { error?: string };
-    throw new Error(payload.error ?? `request_failed_${response.status}`);
-  }
-  if (response.status === 204) return undefined as T;
-  return response.json() as Promise<T>;
-}
-
-function initials(name: string) {
-  return name.trim().split(/\s+/).slice(0, 2).map(part => part.charAt(0).toUpperCase()).join("") || "?";
-}
-
-function colorIndex(name: string) {
-  return [...name].reduce((sum, char) => sum + char.charCodeAt(0), 0) % 6;
-}
-
-function Avatar({ name, size = "md", online = false }: { name: string; size?: "sm" | "md" | "lg"; online?: boolean }) {
-  return <span className={`avatar avatar-${size} avatar-tone-${colorIndex(name)}`} role="img" aria-label={online ? `${name}, online` : name}>
-    {initials(name)}{online && <i className="online-dot" aria-hidden="true" />}
-  </span>;
-}
-
-function Icon({ name, size = 20 }: { name: string; size?: number }) {
-  const common = { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, "aria-hidden": true as const };
-  const paths: Record<string, ReactNode> = {
-    search: <><circle cx="10.8" cy="10.8" r="6.8" /><path d="m16 16 4.2 4.2" /></>,
-    plus: <><path d="M12 5v14M5 12h14" /></>,
-    send: <><path d="m21 3-7.2 18-3.6-7.2L3 10.2 21 3Z" /><path d="M10.2 13.8 15 9" /></>,
-    paperclip: <><path d="m8.5 12.5 7-7a4 4 0 0 1 5.7 5.7l-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2" /></>,
-    logout: <><path d="M10 17l5-5-5-5M15 12H3" /><path d="M12 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-6" /></>,
-    close: <><path d="m18 6-12 12M6 6l12 12" /></>,
-    back: <><path d="m15 18-6-6 6-6" /></>,
-    users: <><path d="M16 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="10" cy="7" r="4" /><path d="M20 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8" /></>,
-    image: <><rect x="3" y="3" width="18" height="18" rx="3" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="m21 15-5-5L5 21" /></>,
-    message: <><path d="M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8A8.5 8.5 0 0 1 8.7 3.9a8.4 8.4 0 0 1 3.8-.9h.5a8.5 8.5 0 0 1 8 8v.5Z" /></>,
-  };
-  return <svg {...common}>{paths[name] ?? paths.message}</svg>;
-}
+type Workspace = "chats" | "calls" | "settings";
+const navigation = [
+  { view: "chats", label: "Chats", icon: "message" },
+  { view: "calls", label: "Calls", icon: "phone" },
+  { view: "settings", label: "Settings", icon: "settings" },
+] as const;
+const conversationLink = /^#chat\/([a-f0-9-]{36})$/i;
 
 function conversationName(conversation: ConversationSummary, userId: string) {
   if (conversation.type === "group") return conversation.title || "Untitled group";
-  return conversation.participants.find(person => person.id !== userId)?.displayName ?? "Conversation";
+  return conversation.participants.find(person => person.id !== userId)?.displayName ?? "Deleted account";
 }
 
 function conversationSubtitle(conversation: ConversationSummary, userId: string) {
   if (conversation.type === "group") return `${conversation.participants.length} members`;
-  return `@${conversation.participants.find(person => person.id !== userId)?.username ?? "member"}`;
+  const peer = conversation.participants.find(person => person.id !== userId);
+  return peer ? `@${peer.username}` : "Read-only conversation";
 }
 
 function timeLabel(value: string) {
   return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(new Date(value));
 }
 
-function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: PublicUser) => void }) {
+function AuthScreen({ onAuthenticated, notice }: { onAuthenticated: (user: PublicUser) => void; notice: string }) {
   const [mode, setMode] = useState<AuthMode>("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [recovering, setRecovering] = useState(false);
+  const [recovered, setRecovered] = useState(false);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -111,6 +84,7 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: PublicUser) =
     <section className="auth-panel">
       <div className="auth-form-wrap">
         <div className="auth-heading"><span className="eyebrow">WELCOME {mode === "login" ? "BACK" : "ABOARD"}</span><h2>{mode === "login" ? "Sign in to chat" : "Create your account"}</h2><p>{mode === "login" ? "Pick up where your conversations left off." : "Choose a username your friends can find."}</p></div>
+        {(recovered || notice) && <p className="dialog-feedback" role="status">{recovered ? "Password reset. Sign in with your new password, then generate new recovery codes in Settings." : notice}</p>}
         <form className="auth-form" onSubmit={submit}>
           {mode === "register" && <label>Display name<input autoComplete="name" value={displayName} onChange={event => setDisplayName(event.target.value)} placeholder="What should we call you?" maxLength={100} /></label>}
           <label>Username<input autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} placeholder="your_username" minLength={3} maxLength={32} required /></label>
@@ -118,10 +92,14 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: PublicUser) =
           {error && <p className="form-error" role="alert">{error}</p>}
           <button className="primary-button auth-submit" disabled={busy}>{busy ? <span className="spinner" /> : null}{mode === "login" ? "Sign in" : "Create account"}</button>
         </form>
+        {mode === "login" && <p className="auth-switch"><button type="button" onClick={() => setRecovering(true)}>Forgot password?</button></p>}
         <p className="auth-switch">{mode === "login" ? "New around here?" : "Already have an account?"} <button type="button" onClick={() => { setMode(mode === "login" ? "register" : "login"); setError(""); }}>{mode === "login" ? "Create an account" : "Sign in"}</button></p>
         <p className="auth-privacy">Your conversations are private to you and the people in them.</p>
       </div>
     </section>
+    {recovering && <RecoveryDialog initialUsername={username} onClose={() => setRecovering(false)} onRecovered={name => {
+      setUsername(name); setPassword(""); setError(""); setRecovering(false); setRecovered(true);
+    }} />}
   </main>;
 }
 
@@ -129,8 +107,11 @@ function authError(code: string) {
   const messages: Record<string, string> = {
     invalid_credentials: "That username and password don't match.",
     username_taken: "That username is already taken.",
+    auth_rate_limited: "Too many attempts. Wait a few minutes and try again.",
+    auth_temporarily_unavailable: "Sign-in is temporarily unavailable. Try again shortly.",
     invalid_username: "Use 3–32 letters, numbers, or underscores.",
     invalid_password: "Choose a password with at least 12 characters.",
+    conversation_closed: "This chat is read-only because the other account was deleted.",
     attachment_too_large: "This file exceeds the upload limit for its type.",
     unsupported_media_type: "Choose an image, MP4 video, MP3/WAV audio file, or PDF.",
     media_signature_mismatch: "The file contents don't match the selected file type.",
@@ -144,8 +125,7 @@ export default function Home() {
   const [authChecked, setAuthChecked] = useState(false);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<PublicMessage[]>([]);
-  const [previews, setPreviews] = useState<Record<string, string>>({});
+  const [timelines, setTimelines] = useState<Record<string, PublicMessage[]>>({});
   const [unread, setUnread] = useState<Record<string, number>>({});
   const [draft, setDraft] = useState("");
   const [sidebarQuery, setSidebarQuery] = useState("");
@@ -153,16 +133,67 @@ export default function Home() {
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [working, setWorking] = useState(false);
   const [notice, setNotice] = useState("");
+  const [accountNotice, setAccountNotice] = useState("");
   const [socketOnline, setSocketOnline] = useState(false);
+  const [liveSocket, setLiveSocket] = useState<Socket | null>(null);
+  const [connectionVersion, setConnectionVersion] = useState(0);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [workspace, setWorkspace] = useState<Workspace>("chats");
+  const [compact, setCompact] = useState(false);
+  const [selecting, setSelecting] = useState(false);
+  const [selectedMessages, setSelectedMessages] = useState<string[]>([]);
+  const [deleteTargets, setDeleteTargets] = useState<PublicMessage[]>([]);
+  const [messageAction, setMessageAction] = useState<PublicMessage | null>(null);
+  const [replyTarget, setReplyTarget] = useState<PublicMessage | null>(null);
+  const [forwardTargets, setForwardTargets] = useState<PublicMessage[]>([]);
+  const [forwardDestination, setForwardDestination] = useState("");
+  const [forwardError, setForwardError] = useState("");
+  const [editTarget, setEditTarget] = useState<PublicMessage | null>(null);
+  const [editDraft, setEditDraft] = useState("");
+  const [actionError, setActionError] = useState("");
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [storiesOpen, setStoriesOpen] = useState(false);
+  const [invitation, setInvitation] = useState<string | null>(null);
+  const [olderCursors, setOlderCursors] = useState<Record<string, string | null>>({});
+  const [olderLoading, setOlderLoading] = useState(false);
   const socketRef = useRef<Socket | null>(null);
+  const syncCursors = useRef(new Map<string, string>());
+  const hiddenMessages = useRef(new Map<string, Set<string>>());
+  const forwardAttempts = useRef(new Map<string, string>());
   const mainContentRef = useRef<HTMLElement>(null);
-  const conversationsRef = useRef(conversations);
+  const conversationsLoading = useRef<Map<string, ConversationSummary> | null>(null);
   const selectedRef = useRef(selectedId);
   const fileRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const scrollAnchor = useRef<{ id: string; height: number; top: number } | null>(null);
+  const followTail = useRef(true);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const visibleChatRef = useRef<string | null>(null);
+  const userId = user?.id;
+  const call = useDirectCall(liveSocket, userId, setNotice);
+  const messages = selectedId ? timelines[selectedId] ?? noMessages : noMessages;
 
-  useEffect(() => { conversationsRef.current = conversations; }, [conversations]);
-  useEffect(() => { selectedRef.current = selectedId; }, [selectedId]);
+  useEffect(() => {
+    selectedRef.current = selectedId;
+    visibleChatRef.current = workspace === "chats" && (mobileChatOpen || !window.matchMedia("(max-width: 760px)").matches)
+      ? selectedId : null;
+  }, [mobileChatOpen, selectedId, workspace]);
+
+  useEffect(() => {
+    function readLocation() {
+      const hash = window.location.hash;
+      const direct = conversationLink.exec(hash);
+      const invite = /^#join\/([a-z\d_-]{43})$/i.exec(hash);
+      setWorkspace(hash === "#calls" ? "calls" : hash === "#settings" ? "settings" : "chats");
+      setMobileChatOpen(Boolean(direct));
+      if (direct) setSelectedId(direct[1].toLowerCase());
+      if (invite) setInvitation(invite[1]);
+    }
+    readLocation();
+    window.addEventListener("hashchange", readLocation);
+    return () => window.removeEventListener("hashchange", readLocation);
+  }, []);
 
   const selected = conversations.find(item => item.id === selectedId) ?? null;
   const visibleConversations = useMemo(() => conversations.filter(conversation =>
@@ -170,12 +201,54 @@ export default function Home() {
     conversationSubtitle(conversation, user?.id ?? "").toLowerCase().includes(sidebarQuery.trim().toLowerCase()),
   ), [conversations, sidebarQuery, user?.id]);
 
-  const loadConversations = useCallback(async () => {
-    const rows = await api<ConversationSummary[]>("conversations");
-    setConversations(rows);
-    setSelectedId(current => current && rows.some(row => row.id === current) ? current : rows[0]?.id ?? null);
-    return rows;
+  const addConversation = useCallback((conversation: ConversationSummary) => {
+    conversationsLoading.current?.set(conversation.id, conversation);
+    setConversations(current => current.some(row => row.id === conversation.id)
+      ? current.map(row => row.id === conversation.id ? conversation : row) : [conversation, ...current]);
   }, []);
+
+  const addMessages = useCallback((conversationId: string, incoming: PublicMessage[]) => {
+    if (!incoming.length) return;
+    setTimelines(current => {
+      const hidden = hiddenMessages.current.get(conversationId);
+      const updated = mergeMessages(current[conversationId] ?? [], incoming.filter(message => !hidden?.has(message.id)));
+      const byId = new Map(updated.map(message => [message.id, message]));
+      return { ...current, [conversationId]: updated.map(message => {
+        if (!message.replyToMessageId) return message;
+        if (hidden?.has(message.replyToMessageId)) return { ...message, replyTo: null };
+        const target = byId.get(message.replyToMessageId);
+        return target ? { ...message, replyTo: { id: target.id, senderId: target.senderId, content: target.content,
+          deletedAt: target.deletedAt } } : message;
+      }) };
+    });
+  }, []);
+
+  const removeHidden = useCallback((conversationId: string, ids: string[]) => {
+    if (!ids.length) return;
+    const hidden = hiddenMessages.current.get(conversationId) ?? new Set<string>();
+    ids.forEach(id => hidden.add(id));
+    hiddenMessages.current.set(conversationId, hidden);
+    setTimelines(current => ({ ...current, [conversationId]: (current[conversationId] ?? []).filter(item => !hidden.has(item.id))
+      .map(item => item.replyToMessageId && hidden.has(item.replyToMessageId) ? { ...item, replyTo: null } : item) }));
+    setReplyTarget(current => current && current.conversationId === conversationId && hidden.has(current.id) ? null : current);
+  }, []);
+
+  const clearAccount = useCallback((feedback = "") => {
+    syncCursors.current.clear(); hiddenMessages.current.clear(); forwardAttempts.current.clear();
+    setUser(null); setConversations([]); setSelectedId(null); setTimelines({}); setUnread({});
+    setDraft(""); setNotice(""); setSidebarQuery(""); setModal(null); setMobileChatOpen(false); setWorkspace("chats"); setOlderCursors({});
+    setStoriesOpen(false); setInvitation(null);
+    setAccountNotice(feedback);
+  }, []);
+
+  useEffect(() => {
+    try { setCompact(localStorage.getItem("chatapp.compactMessages") === "1"); } catch { /* Storage may be disabled. */ }
+  }, []);
+
+  function changeDensity(value: boolean) {
+    setCompact(value);
+    try { localStorage.setItem("chatapp.compactMessages", value ? "1" : "0"); } catch { /* Storage may be disabled. */ }
+  }
 
   useEffect(() => {
     let active = true;
@@ -189,85 +262,258 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (!user) return;
+    if (!userId) return;
     let active = true;
     let socket: Socket | null = null;
     let socketRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-    void loadConversations().catch(error => setNotice(error instanceof Error ? authError(error.message) : "Couldn't load chats."));
+    async function loadConversations() {
+      const additions = new Map<string, ConversationSummary>();
+      conversationsLoading.current = additions;
+      try {
+        const rows: ConversationSummary[] = [];
+        let cursor: string | null = null;
+        do {
+          const page: ConversationPage = await api<ConversationPage>(`conversations/page?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+          if (!active || conversationsLoading.current !== additions) return;
+          rows.push(...page.conversations);
+          cursor = page.nextCursor;
+        } while (cursor);
+        if (!active || conversationsLoading.current !== additions) return;
+        const newChats = [...additions.values()].reverse();
+        const chats = [...newChats, ...rows.filter(row => !additions.has(row.id))];
+        setConversations(chats);
+        setSelectedId(current => current && chats.some(row => row.id === current) ? current : chats[0]?.id ?? null);
+        if (socket?.connected) {
+          for (const chat of chats) socket.emit("conversation:join", { conversationId: chat.id });
+        }
+      } catch (error) {
+        if (active && conversationsLoading.current === additions) {
+          setNotice(error instanceof Error ? authError(error.message) : "Couldn't load chats.");
+        }
+      } finally {
+        if (conversationsLoading.current === additions) conversationsLoading.current = null;
+      }
+    }
+    void loadConversations();
     fetch("/api/socket-token", { cache: "no-store" }).then(async response => {
       if (!response.ok) throw new Error("unauthorized");
       return response.json() as Promise<{ accessToken: string; accessExpiresAt: number }>;
     }).then(({ accessToken, accessExpiresAt }) => {
       if (!active) return;
-      const currentSocket = io(process.env.NEXT_PUBLIC_SOCKET_URL ?? "http://127.0.0.1:4080", {
+      const socketUrl = process.env.NEXT_PUBLIC_SOCKET_URL ??
+        (process.env.NODE_ENV === "production" ? window.location.origin : "http://127.0.0.1:4080");
+      const currentSocket = io(socketUrl, {
         auth: { token: accessToken },
+        autoConnect: false,
         reconnection: true,
         reconnectionDelayMax: 5000,
       });
       socket = currentSocket;
       socketRef.current = currentSocket;
+      setLiveSocket(currentSocket);
       currentSocket.on("connect", () => {
         setSocketOnline(true);
-        for (const conversation of conversationsRef.current) currentSocket.emit("conversation:join", { conversationId: conversation.id });
+        setConnectionVersion(version => version + 1);
+        void loadConversations();
       });
-      currentSocket.on("disconnect", () => setSocketOnline(false));
+      currentSocket.on("disconnect", (reason: string) => {
+        setSocketOnline(false);
+        if (reason !== "io server disconnect" || !active) return;
+        void fetch("/api/session", { cache: "no-store" }).then(response => {
+          if (active && response.status === 401) clearAccount("Your session ended. Sign in again to continue.");
+        }).catch(() => undefined);
+      });
+      currentSocket.on("conversation:created", addConversation);
+      currentSocket.on("conversation:invalidated", ({ conversationId }: { conversationId: string }) => {
+        syncCursors.current.delete(conversationId);
+        setTimelines(current => ({ ...current, [conversationId]: [] }));
+        setUnread(current => ({ ...current, [conversationId]: 0 }));
+        if (selectedRef.current === conversationId) setConnectionVersion(version => version + 1);
+        void loadConversations();
+      });
       currentSocket.on("message:new", (message: PublicMessage) => {
-        if (selectedRef.current === message.conversationId) {
-          setMessages(current => current.some(item => item.id === message.id) ? current : [...current, message]);
+        addMessages(message.conversationId, [message]);
+        if (visibleChatRef.current === message.conversationId && document.visibilityState === "visible") {
           void api("conversations/" + message.conversationId + "/read", {
             method: "POST", body: JSON.stringify({ messageId: message.id }),
           }).catch(() => undefined);
-        } else {
+        } else if (message.senderId !== userId) {
           setUnread(current => ({ ...current, [message.conversationId]: (current[message.conversationId] ?? 0) + 1 }));
         }
-        setPreviews(current => ({ ...current, [message.conversationId]: message.content || message.attachment?.fileName || "Attachment" }));
       });
+      currentSocket.on("message:deleted", (event: MessageDeletedEvent) => {
+        setTimelines(current => {
+          const timeline = current[event.conversationId];
+          if (!timeline?.some(message => message.id === event.messageId)) return current;
+          return { ...current, [event.conversationId]: timeline.map(message => message.id === event.messageId
+            ? { ...message, content: "", attachment: null, reactions: [], deletedAt: event.deletedAt }
+            : message.replyTo?.id === event.messageId
+              ? { ...message, replyTo: { ...message.replyTo, content: "", deletedAt: event.deletedAt } } : message) };
+        });
+      });
+      currentSocket.on("message:updated", ({ message }: { message: PublicMessage }) => addMessages(message.conversationId, [message]));
+      currentSocket.on("message:hidden", ({ conversationId, messageIds }: { conversationId: string; messageIds: string[] }) =>
+        removeHidden(conversationId, messageIds));
+      currentSocket.on("group:updated", ({ conversation }: { conversation: ConversationSummary }) => addConversation(conversation));
+      currentSocket.on("group:member_added", () => void loadConversations());
+      currentSocket.on("group:member_removed", ({ conversationId, userId: removed }: { conversationId: string; userId: string }) => {
+        if (removed === userId) {
+          syncCursors.current.delete(conversationId);
+          setTimelines(current => ({ ...current, [conversationId]: [] }));
+        }
+        void loadConversations();
+      });
+      let refreshingSocket = false;
       const refreshSocketSession = async () => {
+        if (refreshingSocket || !active) return;
+        refreshingSocket = true;
+        if (socketRefreshTimer) clearTimeout(socketRefreshTimer);
         try {
-          const response = await fetch("/api/socket-token?refresh=1", { cache: "no-store" });
+          const response = await fetch("/api/socket-token", { method: "POST", cache: "no-store" });
           if (!response.ok) throw new Error("session_refresh_failed");
           const next = await response.json() as { accessToken: string; accessExpiresAt: number };
           if (!active || !socket) return;
           socket.auth = { token: next.accessToken };
-          socket.disconnect();
-          socket.connect();
+          if (socket.connected) {
+            const result = await socket.timeout(4000).emitWithAck("session:authenticate", next.accessToken).catch(() => null);
+            if (!active) return;
+            if (!result?.ok) { socket.disconnect(); socket.connect(); }
+          } else socket.connect();
           scheduleSocketRefresh(next.accessExpiresAt);
         } catch {
           if (active) socketRefreshTimer = setTimeout(() => void refreshSocketSession(), 30_000);
-        }
+        } finally { refreshingSocket = false; }
       };
       const scheduleSocketRefresh = (expiry: number) => {
         if (socketRefreshTimer) clearTimeout(socketRefreshTimer);
         const delay = Math.max(30_000, expiry - Date.now() - 60_000);
         socketRefreshTimer = setTimeout(() => void refreshSocketSession(), delay);
       };
+      currentSocket.on("connect_error", (error: Error) => {
+        if (error.message === "unauthorized") void refreshSocketSession();
+      });
       scheduleSocketRefresh(accessExpiresAt);
+      currentSocket.connect();
     }).catch(() => undefined);
     return () => {
       active = false;
+      conversationsLoading.current = null;
       if (socketRefreshTimer) clearTimeout(socketRefreshTimer);
       socket?.disconnect();
       socketRef.current = null;
+      setLiveSocket(null);
       setSocketOnline(false);
     };
-  }, [loadConversations, user]);
+  }, [addConversation, addMessages, clearAccount, removeHidden, userId]);
 
   useEffect(() => {
-    if (!user || !selectedId) { setMessages([]); return; }
-    let active = true;
-    const socket = socketRef.current;
-    socket?.emit("conversation:join", { conversationId: selectedId });
-    void api<MessagePage>(`conversations/${selectedId}/messages?limit=50`).then(page => {
-      if (!active) return;
-      setMessages(page.messages);
-      const last = page.messages.at(-1);
-      if (last) void api(`conversations/${selectedId}/read`, { method: "POST", body: JSON.stringify({ messageId: last.id }) }).catch(() => undefined);
-    }).catch(error => { if (active) setNotice(error instanceof Error ? authError(error.message) : "Couldn't load messages."); });
+    if (!userId || !selectedId || workspace !== "chats") { setHistoryLoading(false); return; }
+    const controller = new AbortController();
+    const { signal } = controller;
+    const id = selectedId;
+    let attempts = 0;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    async function refreshHistory() {
+      attempts++;
+      setHistoryLoading(true);
+      try {
+        const socket = socketRef.current;
+        if (socket?.connected) {
+          const result = await socket.timeout(5000).emitWithAck("conversation:join", { conversationId: id });
+          if (!result.ok) throw new Error(result.error);
+        }
+        if (signal.aborted) return;
+        let cursor = syncCursors.current.get(id);
+        if (cursor === undefined) {
+          const baseline = await api<MessageSyncPage>(`conversations/${id}/sync`, { signal });
+          const page = await api<MessagePage>(`conversations/${id}/messages?limit=50`, { signal });
+          if (signal.aborted) return;
+          cursor = baseline.cursor;
+          addMessages(id, page.messages);
+          setOlderCursors(current => ({ ...current, [id]: page.nextCursor }));
+        }
+        while (!signal.aborted) {
+          const changes = await api<MessageSyncPage>(`conversations/${id}/sync?after=${encodeURIComponent(cursor)}`, { signal });
+          if (signal.aborted) return;
+          removeHidden(id, changes.removedMessageIds);
+          addMessages(id, changes.messages);
+          syncCursors.current.set(id, changes.cursor);
+          if (!changes.hasMore) break;
+          if (changes.cursor === cursor) throw new Error("invalid_sync_cursor");
+          cursor = changes.cursor;
+        }
+      } catch (error) {
+        if (signal.aborted) return;
+        const code = error instanceof Error ? error.message : "";
+        if (code === "conversation_access_denied" || code === "messaging_blocked") {
+          syncCursors.current.delete(id);
+          setTimelines(current => ({ ...current, [id]: [] }));
+          setNotice("You no longer have access to messages in this chat.");
+        } else if (socketRef.current?.connected) {
+          if (attempts < 3) retryTimer = setTimeout(() => void refreshHistory(), 1500 * attempts);
+          else setNotice("Couldn't load messages. Select this chat to retry.");
+        }
+      } finally { if (!signal.aborted) setHistoryLoading(false); }
+    }
+    void refreshHistory();
     setUnread(current => ({ ...current, [selectedId]: 0 }));
-    return () => { active = false; };
-  }, [selectedId, user]);
+    return () => { controller.abort(); clearTimeout(retryTimer); };
+  }, [addMessages, connectionVersion, removeHidden, selectedId, userId, workspace]);
 
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [messages]);
+  const newestMessageId = messages.at(-1)?.id;
+  useEffect(() => {
+    if (!userId || !selectedId || !newestMessageId || workspace !== "chats" ||
+        (!mobileChatOpen && window.matchMedia("(max-width: 760px)").matches)) return;
+    const markRead = () => {
+      if (document.visibilityState !== "visible") return;
+      void api(`conversations/${selectedId}/read`, { method: "POST", body: JSON.stringify({ messageId: newestMessageId }) }).catch(() => undefined);
+    };
+    markRead();
+    document.addEventListener("visibilitychange", markRead);
+    return () => document.removeEventListener("visibilitychange", markRead);
+  }, [mobileChatOpen, newestMessageId, selectedId, userId, workspace]);
+
+  useEffect(() => {
+    setSelecting(false); setSelectedMessages([]); setDeleteTargets([]); setMessageAction(null);
+    setReplyTarget(null); setForwardTargets([]); setEditTarget(null); setDetailsOpen(false); setDraft("");
+    followTail.current = true;
+  }, [selectedId, userId]);
+
+  useLayoutEffect(() => {
+    const anchor = scrollAnchor.current;
+    const scroller = scrollRef.current;
+    if (scroller && anchor?.id === selectedId) {
+      scroller.scrollTop = anchor.top + scroller.scrollHeight - anchor.height;
+      scrollAnchor.current = null;
+    }
+  }, [messages, selectedId]);
+
+  useEffect(() => {
+    if (followTail.current) bottomRef.current?.scrollIntoView({ block: "end", behavior: "instant" });
+  }, [mobileChatOpen, newestMessageId, selectedId, workspace]);
+
+  function navigate(view: Workspace, conversationId?: string) {
+    const hash = conversationId ? `#chat/${conversationId}` : `#${view}`;
+    if (window.location.hash !== hash) window.location.hash = hash;
+    setWorkspace(view);
+    setMobileChatOpen(Boolean(conversationId));
+  }
+
+  async function loadOlder() {
+    const id = selectedId;
+    if (!id || olderLoading) return;
+    const before = olderCursors[id];
+    if (!before) return;
+    setOlderLoading(true);
+    try {
+      const page = await api<MessagePage>(`conversations/${id}/messages?before=${encodeURIComponent(before)}`);
+      const scroller = scrollRef.current;
+      if (scroller && selectedRef.current === id) scrollAnchor.current = { id, top: scroller.scrollTop, height: scroller.scrollHeight };
+      addMessages(id, page.messages);
+      setOlderCursors(current => ({ ...current, [id]: page.nextCursor }));
+    } catch { setNotice("Couldn't load older messages."); }
+    finally { setOlderLoading(false); }
+  }
 
   async function startConversation(person: PublicUser) {
     setWorking(true);
@@ -275,9 +521,9 @@ export default function Home() {
       const conversation = await api<ConversationSummary>("conversations/direct", {
         method: "POST", body: JSON.stringify({ userId: person.id }),
       });
-      setConversations(current => current.some(item => item.id === conversation.id) ? current : [conversation, ...current]);
+      addConversation(conversation);
       setSelectedId(conversation.id);
-      setMobileChatOpen(true);
+      navigate("chats", conversation.id);
       setModal(null);
       socketRef.current?.emit("conversation:join", { conversationId: conversation.id });
     } catch (error) { setNotice(error instanceof Error ? authError(error.message) : "Couldn't start that chat."); }
@@ -290,9 +536,9 @@ export default function Home() {
       const conversation = await api<ConversationSummary>("conversations/groups", {
         method: "POST", body: JSON.stringify({ title, userIds: people.map(person => person.id) }),
       });
-      setConversations(current => [conversation, ...current.filter(item => item.id !== conversation.id)]);
+      addConversation(conversation);
       setSelectedId(conversation.id);
-      setMobileChatOpen(true);
+      navigate("chats", conversation.id);
       setModal(null);
       socketRef.current?.emit("conversation:join", { conversationId: conversation.id });
     } catch (error) { setNotice(error instanceof Error ? authError(error.message) : "Couldn't create the group."); }
@@ -303,16 +549,19 @@ export default function Home() {
     event.preventDefault();
     if (!selectedId || !draft.trim() || working) return;
     const content = draft.trim();
-    setDraft("");
+    const conversationId = selectedId;
+    const replyToMessageId = replyTarget?.id;
     setWorking(true);
     try {
-      const message = await api<PublicMessage>(`conversations/${selectedId}/messages`, {
-        method: "POST", body: JSON.stringify({ clientMessageId: crypto.randomUUID(), content }),
+      const message = await api<PublicMessage>(`conversations/${conversationId}/messages`, {
+        method: "POST", body: JSON.stringify({ clientMessageId: crypto.randomUUID(), content, replyToMessageId }),
       });
-      setMessages(current => current.some(item => item.id === message.id) ? current : [...current, message]);
-      setPreviews(current => ({ ...current, [selectedId]: message.content }));
+      addMessages(conversationId, [message]);
+      if (selectedRef.current === conversationId) {
+        setDraft(current => current.trim() === content ? "" : current);
+        setReplyTarget(current => current?.id === replyToMessageId ? null : current);
+      }
     } catch (error) {
-      setDraft(content);
       setNotice(error instanceof Error ? authError(error.message) : "Message couldn't be sent.");
     } finally { setWorking(false); }
   }
@@ -326,110 +575,303 @@ export default function Home() {
     try {
       const response = await fetch(`/api/backend/conversations/${selectedId}/attachments`, {
         method: "POST",
-        headers: { "Content-Type": file.type, "X-File-Name": encodeURIComponent(file.name), "X-Client-Message-Id": crypto.randomUUID() },
+        headers: { "Content-Type": file.type, "X-File-Name": encodeURIComponent(file.name), "X-Client-Message-Id": crypto.randomUUID(),
+          ...(replyTarget ? { "X-Reply-To-Message-Id": replyTarget.id } : {}) },
         body: file,
       });
       const payload = await response.json() as PublicMessage & { error?: string };
       if (!response.ok) throw new Error(payload.error ?? "upload_failed");
-      setMessages(current => current.some(item => item.id === payload.id) ? current : [...current, payload]);
-      setPreviews(current => ({ ...current, [selectedId]: file.name }));
+      addMessages(selectedId, [payload]);
+      if (selectedRef.current === selectedId) setReplyTarget(null);
     } catch (error) { setNotice(error instanceof Error ? authError(error.message) : "File couldn't be uploaded."); }
     finally { setWorking(false); if (fileRef.current) fileRef.current.value = ""; }
   }
 
-  async function logout() {
-    await fetch("/api/session", { method: "DELETE" }).catch(() => undefined);
+  async function logout(everywhere: boolean) {
+    const response = await fetch(everywhere ? "/api/session?all=1" : "/api/session", { method: "DELETE" });
+    if (!response.ok) throw new Error("sign_out_failed");
     socketRef.current?.disconnect();
-    setUser(null); setConversations([]); setSelectedId(null); setMessages([]); setMobileChatOpen(false);
+    clearAccount();
+  }
+
+  async function saveProfile(values: ProfileFields) {
+    const profile = await api<PublicUser>("users/me", { method: "PATCH", body: JSON.stringify(values) });
+    setUser(profile);
+  }
+
+  function toggleMessage(id: string) {
+    setSelectedMessages(current => current.includes(id) ? current.filter(value => value !== id) :
+      current.length >= 100 ? current : [...current, id]);
+  }
+
+  const pickedMessages = messages.filter(message => selectedMessages.includes(message.id) && !message.deletedAt);
+
+  async function copySelected() {
+    const text = pickedMessages.map(message => message.content).filter(Boolean).join("\n");
+    if (!text) return;
+    try { await navigator.clipboard.writeText(text); setNotice("Selected text copied."); }
+    catch { setNotice("Couldn't copy text. Check your browser permissions."); }
+  }
+
+  async function deleteMessages(scope: "mine" | "everyone") {
+    if (working || !deleteTargets.length || !selectedId) return;
+    if (scope === "everyone" && deleteTargets.some(message => message.senderId !== userId)) return;
+    setWorking(true);
+    setActionError("");
+    if (scope === "mine") {
+      try {
+        const result = await api<{ messageIds: string[] }>(`conversations/${selectedId}/messages/hide`, {
+          method: "POST", body: JSON.stringify({ messageIds: deleteTargets.map(message => message.id) }),
+        });
+        removeHidden(selectedId, result.messageIds);
+        setSelectedMessages(current => current.filter(id => !result.messageIds.includes(id)));
+        setDeleteTargets([]);
+        setNotice(result.messageIds.length === 1 ? "Message removed from your view." : "Messages removed from your view.");
+      } catch { setActionError("Couldn't delete the selected messages. Try again."); }
+      finally { setWorking(false); }
+      return;
+    }
+    const results = await Promise.allSettled(deleteTargets.map(async message => {
+      const deleted = await api<PublicMessage>(`conversations/${message.conversationId}/messages/${message.id}`, { method: "DELETE" });
+      addMessages(message.conversationId, [deleted]);
+      return message.id;
+    }));
+    const removed = new Set(results.flatMap(result => result.status === "fulfilled" ? [result.value] : []));
+    const failed = results.length - removed.size;
+    setSelectedMessages(current => current.filter(id => !removed.has(id)));
+    setDeleteTargets([]);
+    setWorking(false);
+    setNotice(failed ? `${removed.size} deleted. ${failed} couldn't be deleted. Try again.` :
+      removed.size === 1 ? "Message deleted." : `${removed.size} messages deleted.`);
+  }
+
+  function chooseReply(message: PublicMessage) {
+    setReplyTarget(message); setMessageAction(null); setSelecting(false); setSelectedMessages([]);
+    requestAnimationFrame(() => composerRef.current?.focus());
+  }
+
+  function openForward(targets: PublicMessage[]) {
+    setForwardTargets(targets); setMessageAction(null); setForwardDestination(""); setForwardError("");
+    forwardAttempts.current.clear();
+  }
+
+  async function forwardMessages(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (working || !forwardDestination || !forwardTargets.length) return;
+    setWorking(true); setForwardError("");
+    const count = forwardTargets.length;
+    try {
+      for (const message of forwardTargets) {
+        const key = `${forwardDestination}:${message.id}`;
+        const clientMessageId = forwardAttempts.current.get(key) ?? crypto.randomUUID();
+        forwardAttempts.current.set(key, clientMessageId);
+        const copy = await api<PublicMessage>(`conversations/${message.conversationId}/messages/${message.id}/forward`, {
+          method: "POST", body: JSON.stringify({ conversationId: forwardDestination, clientMessageId }),
+        });
+        addMessages(forwardDestination, [copy]);
+      }
+      setForwardTargets([]); setSelecting(false); setSelectedMessages([]);
+      setNotice(count === 1 ? "Message forwarded." : `${count} messages forwarded.`);
+    } catch { setForwardError("Couldn't finish forwarding. Retrying to this chat keeps copies already sent."); }
+    finally { setWorking(false); }
+  }
+
+  async function saveEditedMessage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!editTarget || !editDraft.trim() || working) return;
+    setWorking(true); setActionError("");
+    try {
+      const updated = await api<PublicMessage>(`conversations/${editTarget.conversationId}/messages/${editTarget.id}`, {
+        method: "PUT", body: JSON.stringify({ content: editDraft.trim() }),
+      });
+      addMessages(updated.conversationId, [updated]);
+      setEditTarget(null);
+    } catch { setActionError("Couldn't save this edit. Try again."); }
+    finally { setWorking(false); }
   }
 
   function selectConversation(conversationId: string) {
+    if (selectedId === conversationId) setConnectionVersion(version => version + 1);
     setSelectedId(conversationId);
     setUnread(current => ({ ...current, [conversationId]: 0 }));
-    setMobileChatOpen(true);
+    navigate("chats", conversationId);
   }
 
   function handleComposerKey(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); }
+    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing &&
+        !window.matchMedia("(pointer: coarse)").matches) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); }
   }
 
   if (!authChecked) return <main className="boot-screen"><span className="brand-mark"><Icon name="message" /></span><span className="spinner spinner-dark" /></main>;
-  if (!user) return <AuthScreen onAuthenticated={setUser} />;
+  if (!user) return <AuthScreen notice={accountNotice} onAuthenticated={profile => { setAccountNotice(""); setUser(profile); }} />;
 
-  return <main className={`messenger ${mobileChatOpen ? "mobile-chat-open" : ""}`}>
+  const callConversation = call.view && conversations.find(row => row.id === call.view?.conversationId);
+  const callName = callConversation ? conversationName(callConversation, user.id) : "Chat contact";
+  const closedChat = selected?.type === "direct" && selected.participants.length < 2;
+
+  return <main className={`messenger workspace-${workspace}${mobileChatOpen ? " mobile-chat-open" : ""}${compact ? " compact-messages" : ""}`}>
     <a className="skip-link" href="#main-content" onClick={event => {
-      if (window.matchMedia("(max-width: 680px)").matches && !mobileChatOpen) {
-        event.preventDefault();
-        setMobileChatOpen(true);
-        setTimeout(() => mainContentRef.current?.focus(), 0);
-      }
-    }}>Skip to conversation</a>
-    <aside className="chat-sidebar">
+      event.preventDefault();
+      if (workspace === "chats" && !mobileChatOpen && window.matchMedia("(max-width: 760px)").matches) {
+        document.getElementById("inbox-content")?.focus();
+      } else mainContentRef.current?.focus();
+    }}>Skip to main content</a>
+    <div className="workspace-rail">
+      <a className="rail-brand brand-mark" href="#chats" aria-label="Chatapp"><Icon name="message" size={20} /></a>
+      <nav className="workspace-nav" aria-label="Chatapp">
+        {navigation.map(item => <a className="workspace-nav-link" key={item.view} href={`#${item.view}`}
+          aria-current={workspace === item.view ? "page" : undefined} onClick={event => {
+            event.preventDefault(); navigate(item.view);
+          }}><Icon name={item.icon} size={21} /><span>{item.label}</span></a>)}
+      </nav>
+      <button className="icon-button rail-profile" type="button" aria-label="Open profile settings" title="Open profile settings" onClick={() => navigate("settings")}><Avatar name={user.displayName} src={user.avatarUrl} size="sm" /></button>
+    </div>
+    {workspace === "chats" && <aside className="chat-sidebar" id="inbox-content" tabIndex={-1} aria-label="Chats">
       <div className="sidebar-top">
-        <a className="brand" href="#home" aria-label="Chatapp home"><span className="brand-mark"><Icon name="message" size={19} /></span><span>chatapp</span></a>
-        <button className="icon-button user-menu" type="button" title="Sign out" aria-label="Sign out" onClick={logout}><Avatar name={user.displayName} size="sm" /></button>
-      </div>
-      <div className="sidebar-greeting"><span>YOUR INBOX</span><h1>Messages</h1></div>
-      <div className="sidebar-actions">
-        <label className="search-box"><Icon name="search" size={18} /><input value={sidebarQuery} onChange={event => setSidebarQuery(event.target.value)} placeholder="Search conversations" aria-label="Search conversations" /></label>
+        <div className="inbox-heading"><h1>Chats</h1><span className="inbox-count" aria-label={`${conversations.length} chats`}>{conversations.length}</span></div>
         <button className="icon-button new-chat-button" type="button" aria-label="Start a new chat" title="Start a new chat" onClick={() => setModal("chat")}><Icon name="plus" /></button>
       </div>
-      <div className="inbox-tabs"><span className="active-tab">All chats <b>{conversations.length}</b></span><button type="button" onClick={() => setModal("group")}><Icon name="users" size={16} /> New group</button></div>
+      <div className="sidebar-actions">
+        <label className="search-box"><Icon name="search" size={18} /><input value={sidebarQuery} onChange={event => setSidebarQuery(event.target.value)} placeholder="Search conversations" aria-label="Search conversations" /></label>
+      </div>
+      <div className="inbox-tabs">
+        <button type="button" onClick={() => setModal("group")}><Icon name="users" size={17} /> New group</button>
+        <button type="button" onClick={() => setStoriesOpen(true)}><Icon name="story" size={17} /> Stories</button>
+        <button type="button" onClick={() => setInvitation("")}>Join group</button>
+      </div>
       <div className="conversation-list" role="list" aria-label="Conversations">
         {visibleConversations.map(conversation => {
           const name = conversationName(conversation, user.id);
-          const preview = previews[conversation.id] ?? (conversation.type === "group" ? "Group conversation" : "Start a conversation");
-          return <button className={`conversation-row ${selectedId === conversation.id ? "selected" : ""}`} key={conversation.id} type="button" role="listitem" onClick={() => selectConversation(conversation.id)}>
+          const latest = timelines[conversation.id]?.at(-1);
+          const preview = latest?.deletedAt ? "Message deleted" : latest?.content || latest?.attachment?.fileName ||
+            (conversation.type === "group" ? "Group conversation" : "Start a conversation");
+          return <div role="listitem" key={conversation.id}><button className={`conversation-row ${selectedId === conversation.id ? "selected" : ""}`} type="button"
+            aria-current={selectedId === conversation.id ? "true" : undefined} onClick={() => selectConversation(conversation.id)}>
             <Avatar name={name} size="lg" />
             <span className="conversation-copy"><span className="conversation-title">{name}</span><span className="conversation-preview">{preview}</span></span>
-            <span className="conversation-meta">{unread[conversation.id] ? <b className="unread-count">{unread[conversation.id]}</b> : null}</span>
-          </button>;
+            <span className="conversation-meta">{latest && <time dateTime={latest.createdAt}>{timeLabel(latest.createdAt)}</time>}{unread[conversation.id] ? <b className="unread-count" aria-label={`${unread[conversation.id]} unread`}>{unread[conversation.id]}</b> : null}</span>
+          </button></div>;
         })}
         {!visibleConversations.length && <div className="empty-list"><span className="empty-icon"><Icon name="search" size={22} /></span><strong>{sidebarQuery ? "No matches" : "Your chats will show up here"}</strong><p>{sidebarQuery ? "Try another name or username." : "Start a chat and say hello."}</p>{!sidebarQuery && <button type="button" className="text-button" onClick={() => setModal("chat")}>Find someone <span>→</span></button>}</div>}
       </div>
       <div className="sidebar-bottom"><div className={`connection-indicator ${socketOnline ? "is-online" : ""}`}><span />{socketOnline ? "Connected" : "Reconnecting…"}</div><span className="sidebar-user">Signed in as <strong>{user.displayName}</strong></span></div>
-    </aside>
+    </aside>}
 
-    <section ref={mainContentRef} className={`chat-panel ${selected ? "has-chat" : ""}`} aria-label="Conversation" id="main-content" tabIndex={-1}>
-      {selected ? <>
+    <section ref={mainContentRef} className={workspace === "chats" ? `chat-panel ${selected ? "has-chat" : ""}` : "workspace-panel"} aria-label={workspace === "chats" ? "Conversation" : workspace === "calls" ? "Calls" : "Settings"} id="main-content" tabIndex={-1}>
+      {workspace === "calls" ? <CallHistory userId={user.id} online={socketOnline} calling={!!call.view}
+        contactName={id => { const chat = conversations.find(row => row.id === id); return chat && chat.participants.length > 1 ? conversationName(chat, user.id) : undefined; }}
+        onOpenChat={selectConversation} onCall={(id, kind) => void call.start(id, kind)} />
+      : workspace === "settings" ? <ChatSettings user={user} compact={compact} onDensityChange={changeDensity} onSave={saveProfile} onSignOut={logout}
+        onDeleted={() => clearAccount("Your account was deleted.")} onPasswordChanged={() => clearAccount("Password changed. Sign in again to continue.")} />
+      : selected ? <>
         <header className="chat-header">
-          <button className="icon-button mobile-back" type="button" aria-label="Back to chats" onClick={() => setMobileChatOpen(false)}><Icon name="back" /></button>
+          <button className="icon-button mobile-back" type="button" aria-label="Back to chats" onClick={() => { navigate("chats"); requestAnimationFrame(() => document.getElementById("inbox-content")?.focus()); }}><Icon name="back" /></button>
           <Avatar name={conversationName(selected, user.id)} size="md" />
           <div className="chat-heading"><h2>{conversationName(selected, user.id)}</h2><span>{conversationSubtitle(selected, user.id)}</span></div>
-          <div className="header-tools"><span className={`connection-indicator header-connection ${socketOnline ? "is-online" : ""}`}><span />{socketOnline ? "Live" : "Offline"}</span><button className="icon-button" type="button" title="Sign out" aria-label="Sign out" onClick={logout}><Icon name="logout" /></button></div>
+          <div className="header-tools">
+            <span className={`connection-indicator header-connection ${socketOnline ? "is-online" : ""}`}><span />{socketOnline ? historyLoading ? "Catching up…" : "Live" : "Offline"}</span>
+            {selected.type === "direct" && !closedChat && <>
+              <button className="icon-button chat-tool" type="button" aria-label="Voice call" title="Voice call" disabled={!socketOnline || !!call.view} onClick={() => void call.start(selected.id, "voice")}><Icon name="phone" /></button>
+              <button className="icon-button chat-tool" type="button" aria-label="Video call" title="Video call" disabled={!socketOnline || !!call.view} onClick={() => void call.start(selected.id, "video")}><Icon name="video" /></button>
+            </>}
+            <button className="icon-button chat-tool" type="button" aria-label="Select messages" title="Select messages" aria-pressed={selecting} disabled={!messages.some(message => !message.deletedAt)} onClick={() => { setSelecting(!selecting); setSelectedMessages([]); }}><Icon name="select" /></button>
+            <button className="icon-button chat-tool details-button" type="button" aria-label="Conversation details" title="Conversation details" onClick={() => setDetailsOpen(true)}><Icon name="more" /></button>
+          </div>
         </header>
-        {notice && <div className="notice-bar" role="status"><span>{notice}</span><button type="button" aria-label="Dismiss message" onClick={() => setNotice("")}><Icon name="close" size={16} /></button></div>}
-        <div className="message-scroll">
-          <div className="chat-date"><span>THIS IS THE START OF YOUR STORY</span></div>
+        {selecting && <div className="message-selection" aria-label="Message selection actions">
+          <span role="status">{pickedMessages.length} selected</span>
+          <button className="quiet-button" type="button" disabled={pickedMessages.length !== 1 || !!closedChat} onClick={() => chooseReply(pickedMessages[0])}>Reply</button>
+          <button className="quiet-button" type="button" disabled={!pickedMessages.length || working} onClick={() => openForward(pickedMessages)}>Forward</button>
+          <button className="quiet-button copy-selection" type="button" disabled={!pickedMessages.some(message => message.content)} onClick={() => void copySelected()}>Copy</button>
+          <button className="danger-button" type="button" disabled={!pickedMessages.length || working} onClick={() => { setActionError(""); setDeleteTargets(pickedMessages); }}>Delete</button>
+          <button className="quiet-button" type="button" onClick={() => { setSelecting(false); setSelectedMessages([]); }}>Done</button>
+        </div>}
+        <div ref={scrollRef} className="message-scroll" tabIndex={0} aria-label="Messages" aria-busy={historyLoading || olderLoading} onScroll={event => {
+          const list = event.currentTarget;
+          followTail.current = list.scrollHeight - list.scrollTop - list.clientHeight < 96;
+        }}>
+          {!!olderCursors[selected.id] && <div className="chat-date"><button className="quiet-button" type="button" disabled={olderLoading} onClick={() => void loadOlder()}>{olderLoading ? "Loading…" : "Load earlier messages"}</button></div>}
+          {!messages.length && !historyLoading && <div className="chat-date"><span>No messages yet</span></div>}
           {messages.map(message => {
             const mine = message.senderId === user.id;
-            return <article className={`message-line ${mine ? "mine" : "theirs"}`} key={message.id}>
+            const checked = selectedMessages.includes(message.id);
+            return <article className={`message-line ${mine ? "mine" : "theirs"}${checked ? " message-selected" : ""}`} key={message.id}>
+              {selecting && !message.deletedAt && <label className="message-checkbox"><input type="checkbox" checked={checked} onChange={() => toggleMessage(message.id)} aria-label={`Select message at ${timeLabel(message.createdAt)}`} /></label>}
+              {!selecting && !message.deletedAt && <button className="icon-button message-menu" type="button" title="Message actions"
+                aria-label={`Message actions at ${timeLabel(message.createdAt)}`} disabled={working} onClick={() => setMessageAction(message)}><Icon name="more" size={17} /></button>}
               {!mine && <Avatar name={selected.type === "group" ? selected.participants.find(person => person.id === message.senderId)?.displayName ?? "Member" : conversationName(selected, user.id)} size="sm" />}
               <div className="message-stack">
                 {!mine && selected.type === "group" && <span className="message-author">{selected.participants.find(person => person.id === message.senderId)?.displayName ?? "Member"}</span>}
                 <div className="message-bubble">
-                  {message.content && <p>{message.content}</p>}
+                  {!message.deletedAt && message.forwarded && <span className="forwarded-label"><Icon name="forward" size={13} /> Forwarded</span>}
+                  {!message.deletedAt && message.replyTo && <blockquote className="message-reply">
+                    <strong>{message.replyTo.senderId === user.id ? "You" : selected.participants.find(person => person.id === message.replyTo?.senderId)?.displayName ?? "Message"}</strong>
+                    <span>{message.replyTo.deletedAt ? "Message deleted" : message.replyTo.content || "Attachment"}</span>
+                  </blockquote>}
+                  {message.deletedAt ? <em>Message deleted</em> : message.content && <p>{message.content}</p>}
                   {message.attachment && <a className="attachment-card" href={`/api/backend${message.attachment.downloadPath.replace(/^\/v1/, "")}`} target="_blank" rel="noreferrer"><span className="attachment-icon"><Icon name={message.type === "image" ? "image" : "paperclip"} /></span><span><strong>{message.attachment.fileName}</strong><small>{message.attachment.contentType} · {formatBytes(message.attachment.sizeBytes)}</small></span></a>}
-                  <span className="message-time">{timeLabel(message.createdAt)}{mine && <span className="message-check" aria-label="sent">✓</span>}</span>
+                  <span className="message-time">{message.editedAt && !message.deletedAt && <span>Edited</span>}{timeLabel(message.createdAt)}{mine && <span className="message-check" aria-label="Sent">✓</span>}</span>
                 </div>
               </div>
             </article>;
           })}
           <div ref={bottomRef} />
         </div>
-        <form className="composer" onSubmit={sendMessage}>
-          <input ref={fileRef} className="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp,video/mp4,audio/mpeg,audio/wav,application/pdf" onChange={event => { const file = event.currentTarget.files?.[0]; if (file) void uploadFile(file); }} />
+        {closedChat ? <p className="chat-closed">This chat is read-only.</p> : <form className="composer" onSubmit={sendMessage}>
+          {replyTarget && <div className="composer-reply"><div><strong>Replying to {replyTarget.senderId === user.id ? "yourself" : selected.participants.find(person => person.id === replyTarget.senderId)?.displayName ?? "a message"}</strong><span>{replyTarget.content || replyTarget.attachment?.fileName || "Message"}</span></div>
+            <button className="icon-button" type="button" aria-label="Cancel reply" onClick={() => setReplyTarget(null)}><Icon name="close" size={17} /></button></div>}
+          <input ref={fileRef} className="visually-hidden" type="file" tabIndex={-1} aria-hidden="true" accept="image/jpeg,image/png,image/webp,video/mp4,audio/mpeg,audio/wav,application/pdf" onChange={event => { const file = event.currentTarget.files?.[0]; if (file) void uploadFile(file); }} />
           <button className="icon-button attach-button" type="button" aria-label="Attach a file" title="Attach a file" disabled={working} onClick={() => fileRef.current?.click()}><Icon name="paperclip" /></button>
-          <textarea value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={handleComposerKey} placeholder="Write a message…" aria-label="Write a message" maxLength={4000} rows={1} />
+          <textarea ref={composerRef} value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={handleComposerKey} placeholder="Write a message…" aria-label="Write a message" maxLength={4000} rows={1} />
           <span className="composer-hint">Enter to send · Shift+Enter for a new line</span>
           <button className="send-button" type="submit" aria-label="Send message" title="Send message" disabled={!draft.trim() || working}><Icon name="send" size={18} /></button>
-        </form>
+        </form>}
       </> : <div className="welcome-panel">
-        <div className="welcome-art"><span className="welcome-orbit" /><span className="welcome-card card-a"><Avatar name="Maya Chen" size="sm" /><i /></span><span className="welcome-card card-b"><Avatar name="Noah James" size="sm" /><i /><i /></span><span className="welcome-center"><Icon name="message" size={32} /></span></div>
-        <span className="eyebrow">A LITTLE SPACE FOR YOUR PEOPLE</span><h2>Make room for<br />good conversations.</h2><p>Pick a chat from the list or start a new one. Your messages stay between you and the people in them.</p><button className="primary-button" type="button" onClick={() => setModal("chat")}><Icon name="plus" size={18} /> Start a conversation</button>
+        <div className="welcome-art"><span className="welcome-center"><Icon name="message" size={32} /></span></div>
+        <h2>No chat selected</h2><p>Choose a conversation or start a new one.</p><button className="primary-button" type="button" onClick={() => setModal("chat")}><Icon name="plus" size={18} /> Start a chat</button>
       </div>}
     </section>
 
+    {notice && <div className="app-toast" role="status"><span>{notice}</span><button className="icon-button" type="button" aria-label="Dismiss message" onClick={() => setNotice("")}><Icon name="close" size={16} /></button></div>}
+    {call.view && <CallPanel key={call.view.callId} call={call.view} name={callName} onAccept={() => void call.accept()} onEnd={call.end} />}
+    {detailsOpen && selected && <ConversationDetails conversation={selected} userId={user.id} onClose={() => setDetailsOpen(false)}
+      onUpdated={addConversation} onLeft={() => { setDetailsOpen(false); setConversations(current => current.filter(item => item.id !== selected.id)); setSelectedId(null); navigate("chats"); }} />}
+    {storiesOpen && <StoriesDialog userId={user.id} onClose={() => setStoriesOpen(false)} />}
+    {invitation !== null && <InvitationDialog initialToken={invitation} onClose={() => { setInvitation(null); navigate("chats"); }}
+      onJoined={chat => { addConversation(chat); setInvitation(null); selectConversation(chat.id); }} />}
+    {messageAction && <ChatDialog title="Message actions" onClose={() => setMessageAction(null)}>
+      <div className="action-stack">
+        {!closedChat && <button className="quiet-button" type="button" onClick={() => chooseReply(messageAction)}><Icon name="reply" size={17} /> Reply</button>}
+        <button className="quiet-button" type="button" onClick={() => openForward([messageAction])}><Icon name="forward" size={17} /> Forward</button>
+        {messageAction.senderId === user.id && !!messageAction.content && <button className="quiet-button" type="button" onClick={() => {
+          setEditDraft(messageAction.content); setEditTarget(messageAction); setActionError(""); setMessageAction(null);
+        }}><Icon name="edit" size={17} /> Edit</button>}
+        <button className="danger-button" type="button" onClick={() => { setActionError(""); setDeleteTargets([messageAction]); setMessageAction(null); }}><Icon name="trash" size={17} /> Delete</button>
+      </div>
+    </ChatDialog>}
+    {!!forwardTargets.length && <ChatDialog title={forwardTargets.length === 1 ? "Forward message" : `Forward ${forwardTargets.length} messages`} onClose={() => { if (!working) setForwardTargets([]); }}>
+      <form className="account-form" aria-busy={working} onSubmit={forwardMessages}>
+        <label>Send to<select value={forwardDestination} onChange={event => setForwardDestination(event.target.value)} disabled={working} required>
+          <option value="">Choose a chat</option>{conversations.filter(chat => chat.type === "group" || chat.participants.length > 1).map(chat => <option key={chat.id} value={chat.id}>{conversationName(chat, user.id)}</option>)}
+        </select></label>
+        {forwardError && <p className="form-error" role="alert">{forwardError}</p>}
+        <button className="primary-button" disabled={!forwardDestination || working}>{working ? "Forwarding…" : "Forward"}</button>
+      </form>
+    </ChatDialog>}
+    {editTarget && <ChatDialog title="Edit message" onClose={() => { if (!working) setEditTarget(null); }}>
+      <form className="account-form" aria-busy={working} onSubmit={saveEditedMessage}>
+        <label>Message<textarea autoFocus rows={4} value={editDraft} onChange={event => setEditDraft(event.target.value)} maxLength={4000} required /></label>
+        {actionError && <p className="form-error" role="alert">{actionError}</p>}
+        <button className="primary-button" disabled={!editDraft.trim() || working}>{working ? "Saving…" : "Save changes"}</button>
+      </form>
+    </ChatDialog>}
+    {!!deleteTargets.length && <ChatDialog title={deleteTargets.length === 1 ? "Delete message?" : `Delete ${deleteTargets.length} messages?`} onClose={() => { if (!working) setDeleteTargets([]); }}>
+      <p className="dialog-description">Delete from your own history{deleteTargets.every(message => message.senderId === user.id) ? " or remove messages you sent for everyone in this chat" : ""}.</p>
+      {actionError && <p className="form-error" role="alert">{actionError}</p>}
+      <div className="dialog-actions"><button className="quiet-button" type="button" disabled={working} onClick={() => setDeleteTargets([])}>Cancel</button>
+        <button className="quiet-button" type="button" disabled={working} onClick={() => void deleteMessages("mine")}>Delete for me</button>
+        {deleteTargets.every(message => message.senderId === user.id) && <button className="danger-button" type="button" disabled={working} onClick={() => void deleteMessages("everyone")}>{working ? "Deleting…" : "Delete for everyone"}</button>}</div>
+    </ChatDialog>}
     {modal && <PeopleModal mode={modal} onClose={() => setModal(null)} onStart={startConversation} onCreateGroup={createGroup} busy={working} />}
   </main>;
 }
